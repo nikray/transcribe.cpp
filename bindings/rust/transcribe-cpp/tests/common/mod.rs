@@ -95,6 +95,21 @@ pub fn smoke_voxtral_model() -> Option<PathBuf> {
     )
 }
 
+/// Resolve a model strictly from an env var (no repo-relative default).
+/// For fixtures that live outside the repo's models/ convention, e.g. an
+/// arbitrary offline parakeet GGUF for the bias tests.
+pub fn family_model_pub(env: &str) -> Option<PathBuf> {
+    ensure_backends();
+    let path = std::env::var_os(env).map(PathBuf::from)?;
+    path.is_file().then_some(path)
+}
+
+/// Load 16 kHz mono f32 PCM from a wav named by an env var.
+pub fn audio_from_env(env: &str) -> Option<Vec<f32>> {
+    let path = std::env::var_os(env).map(PathBuf::from)?;
+    path.is_file().then(|| load_wav(&path))
+}
+
 /// Both fixtures together; prints a skip note and returns `None` if either is
 /// missing (so the caller can `return` early — the Rust equivalent of skip).
 pub fn smoke_fixtures(test: &str) -> Option<(PathBuf, Vec<f32>)> {
