@@ -248,6 +248,12 @@ struct cli_args {
     bool canary_pnc     = true;   // default: punctuation+caps on
     bool canary_pnc_set = false;  // --pnc / --no-pnc set this
 
+    // Parakeet custom-vocabulary biasing. Ignored by non-Parakeet
+    // families (the ext is attached only when the model accepts it).
+    std::vector<std::string> bias_words;            // --bias-words a,b,c
+    float                    bias_boost     = 0.0f; // --bias-boost F
+    bool                     bias_boost_set = false;
+
     // Speaker diarization toggle (moss / granite-plus). Unset = library
     // default (OFF). --diarize / --no-diarize set this.
     bool diarize     = true;
@@ -318,6 +324,11 @@ void print_usage(const char * argv0) {
                  "  --temperature F       (whisper) tier-0 sampling temperature (default 0 = greedy)\n"
                  "  --condition-on-prev-tokens (whisper) carry prev-chunk tokens across chunks\n"
                  "  --prompt-condition T  (whisper) prompt placement: first|all (default: first)\n"
+                 "  --bias-words W1,W2    (parakeet) custom-vocabulary boosting: boost the\n"
+                 "                        token sequences spelling these comma-separated\n"
+                 "                        words during greedy decode (offline and streaming)\n"
+                 "  --bias-boost F        (parakeet) additive logit boost per matched token\n"
+                 "                        (default 3.0)\n"
                  "  --itn                 (sensevoice/funasr-nano) enable inverse text normalization\n"
                  "  --pnc                 (canary) emit punctuation and capitalization (default)\n"
                  "  --no-pnc              (canary) emit lowercase de-punctuated text\n"
@@ -585,6 +596,31 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
                 return false;
             }
             out.whisper_set = true;
+        } else if (a == "--bias-words") {
+            const char * v = take_value(a.c_str());
+            if (!v) {
+                return false;
+            }
+            // Comma-separated word/phrase list; empty items dropped.
+            std::string       item;
+            const std::string vs = v;
+            for (size_t i = 0; i <= vs.size(); ++i) {
+                if (i == vs.size() || vs[i] == ',') {
+                    if (!item.empty()) {
+                        out.bias_words.push_back(item);
+                    }
+                    item.clear();
+                } else {
+                    item.push_back(vs[i]);
+                }
+            }
+        } else if (a == "--bias-boost") {
+            const char * v = take_value(a.c_str());
+            if (!v) {
+                return false;
+            }
+            out.bias_boost     = static_cast<float>(std::atof(v));
+            out.bias_boost_set = true;
         } else if (a == "--itn") {
             out.use_itn = true;
             out.itn_set = true;
@@ -874,6 +910,27 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // Parakeet run-slot vocab biasing (offline decode); see the
+        // single-file path for the streaming-ext counterpart. Allocated
+        // outside the per-file loop like wx so the bytes stay live.
+        struct transcribe_parakeet_bias_run_ext bias_rx;
+        transcribe_parakeet_bias_run_ext_init(&bias_rx);
+        std::vector<const char *> bias_ptrs;
+        for (const auto & w : args.bias_words) {
+            bias_ptrs.push_back(w.c_str());
+        }
+        if (!bias_ptrs.empty() &&
+            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN)) {
+            bias_rx.words   = bias_ptrs.data();
+            bias_rx.n_words = bias_ptrs.size();
+            if (args.bias_boost_set) {
+                bias_rx.boost = args.bias_boost;
+            }
+            if (args.stream_chunk_ms <= 0) {
+                rp.family = &bias_rx.ext;
+            }
+        }
+
         if (args.keep_special_tags) {
             rp.keep_special_tags = true;
         }
@@ -1055,20 +1112,36 @@ int main(int argc, char ** argv) {
                     transcribe_parakeet_buffered_stream_ext_init(&pkt_buf_sp);
                     struct transcribe_voxtral_realtime_stream_ext vx_sp;
                     transcribe_voxtral_realtime_stream_ext_init(&vx_sp);
+                    const bool want_bias        = !bias_ptrs.empty();
                     const bool want_cache_aware = (args.stream_att_right >= 0);
                     const bool want_buffered =
                         args.stream_buf_left_ms >= 0 || args.stream_buf_chunk_ms >= 0 || args.stream_buf_right_ms >= 0;
-                    if (want_cache_aware && transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
-                                                                              TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
-                        pkt_sp.att_context_right = args.stream_att_right;
-                        sp.family                = &pkt_sp.ext;
-                    } else if (want_buffered &&
+                    if (want_bias) {
+                        pkt_sp.bias_words       = bias_ptrs.data();
+                        pkt_sp.n_bias_words     = bias_ptrs.size();
+                        pkt_buf_sp.bias_words   = bias_ptrs.data();
+                        pkt_buf_sp.n_bias_words = bias_ptrs.size();
+                        if (args.bias_boost_set) {
+                            pkt_sp.bias_boost     = args.bias_boost;
+                            pkt_buf_sp.bias_boost = args.bias_boost;
+                        }
+                    }
+                    if ((want_cache_aware || want_bias) &&
+                        transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
+                                                          TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
+                        if (want_cache_aware) {
+                            pkt_sp.att_context_right = args.stream_att_right;
+                        }
+                        sp.family = &pkt_sp.ext;
+                    } else if ((want_buffered || want_bias) &&
                                transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
                                                                  TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM)) {
-                        pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
-                        pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
-                        pkt_buf_sp.right_ms = args.stream_buf_right_ms;
-                        sp.family           = &pkt_buf_sp.ext;
+                        if (want_buffered) {
+                            pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
+                            pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
+                            pkt_buf_sp.right_ms = args.stream_buf_right_ms;
+                        }
+                        sp.family = &pkt_buf_sp.ext;
                     } else if (args.stream_voxtral_delay != -1 &&
                                transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
                                                                  TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM)) {
@@ -1293,6 +1366,28 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // Parakeet run-slot vocab biasing (offline decode). Mutually
+        // exclusive with the whisper ext by model family (one rp.family
+        // slot); the streaming path below carries the same word list in
+        // the stream extension instead.
+        struct transcribe_parakeet_bias_run_ext bias_rx;
+        transcribe_parakeet_bias_run_ext_init(&bias_rx);
+        std::vector<const char *> bias_ptrs;
+        for (const auto & w : args.bias_words) {
+            bias_ptrs.push_back(w.c_str());
+        }
+        if (!bias_ptrs.empty() &&
+            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN)) {
+            bias_rx.words   = bias_ptrs.data();
+            bias_rx.n_words = bias_ptrs.size();
+            if (args.bias_boost_set) {
+                bias_rx.boost = args.bias_boost;
+            }
+            if (args.stream_chunk_ms <= 0) {
+                rp.family = &bias_rx.ext;
+            }
+        }
+
         if (args.keep_special_tags) {
             rp.keep_special_tags = true;
         }
@@ -1330,23 +1425,41 @@ int main(int argc, char ** argv) {
             transcribe_parakeet_buffered_stream_ext_init(&pkt_buf_sp);
             struct transcribe_voxtral_realtime_stream_ext vx_sp;
             transcribe_voxtral_realtime_stream_ext_init(&vx_sp);
+            const bool want_bias        = !bias_ptrs.empty();
             const bool want_cache_aware = (args.stream_att_right >= 0);
             const bool want_buffered =
                 args.stream_buf_left_ms >= 0 || args.stream_buf_chunk_ms >= 0 || args.stream_buf_right_ms >= 0;
-            if (want_cache_aware && transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
-                                                                      TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
-                pkt_sp.att_context_right = args.stream_att_right;
-                sp.family                = &pkt_sp.ext;
-                std::printf("stream: att_context_right=%d\n", args.stream_att_right);
-            } else if (want_buffered &&
+            if (want_bias) {
+                // Same word list on both parakeet stream ext shapes;
+                // whichever ext ends up attached carries it.
+                pkt_sp.bias_words       = bias_ptrs.data();
+                pkt_sp.n_bias_words     = bias_ptrs.size();
+                pkt_buf_sp.bias_words   = bias_ptrs.data();
+                pkt_buf_sp.n_bias_words = bias_ptrs.size();
+                if (args.bias_boost_set) {
+                    pkt_sp.bias_boost     = args.bias_boost;
+                    pkt_buf_sp.bias_boost = args.bias_boost;
+                }
+            }
+            if ((want_cache_aware || want_bias) &&
+                transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
+                                                  TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
+                if (want_cache_aware) {
+                    pkt_sp.att_context_right = args.stream_att_right;
+                    std::printf("stream: att_context_right=%d\n", args.stream_att_right);
+                }
+                sp.family = &pkt_sp.ext;
+            } else if ((want_buffered || want_bias) &&
                        transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
                                                          TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM)) {
-                pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
-                pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
-                pkt_buf_sp.right_ms = args.stream_buf_right_ms;
-                sp.family           = &pkt_buf_sp.ext;
-                std::printf("stream: buffered (L,C,R)_ms=(%d,%d,%d)\n", args.stream_buf_left_ms,
-                            args.stream_buf_chunk_ms, args.stream_buf_right_ms);
+                if (want_buffered) {
+                    pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
+                    pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
+                    pkt_buf_sp.right_ms = args.stream_buf_right_ms;
+                    std::printf("stream: buffered (L,C,R)_ms=(%d,%d,%d)\n", args.stream_buf_left_ms,
+                                args.stream_buf_chunk_ms, args.stream_buf_right_ms);
+                }
+                sp.family = &pkt_buf_sp.ext;
             } else if (args.stream_voxtral_delay != -1 &&
                        transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
                                                          TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM)) {

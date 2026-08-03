@@ -3,14 +3,19 @@
  *
  * Includes transcribe.h; safe to include in C or C++ TUs. Holds the
  * streaming extension structs (cache-aware and chunked-attention
- * variants) and their kind constants and init functions.
+ * variants), the run-slot vocab-bias extension, and their kind
+ * constants and init functions.
  *
- * Acceptance is per-loaded-model-variant: nemotron-speech-streaming-en-0.6b
- * (cache-aware) accepts TRANSCRIBE_EXT_KIND_PARAKEET_STREAM and rejects
+ * Acceptance is per-loaded-model-variant on the STREAM slot:
+ * nemotron-speech-streaming-en-0.6b (cache-aware) accepts
+ * TRANSCRIBE_EXT_KIND_PARAKEET_STREAM and rejects
  * TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM; parakeet-unified-en-0.6b
- * (chunked_limited_with_rc) does the opposite. Probe via
+ * (chunked_limited_with_rc) does the opposite. On the RUN slot every
+ * parakeet variant (TDT / RNN-T / CTC heads alike) accepts
+ * TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN. Probe via
  * transcribe_model_accepts_ext_kind before pointing
- * transcribe_stream_params::family at one of these structs.
+ * transcribe_stream_params::family / transcribe_run_params::family at
+ * one of these structs.
  *
  * FourCC kinds are reserved in docs/extension-kinds.md.
  */
@@ -28,6 +33,39 @@ extern "C" {
 #define TRANSCRIBE_EXT_KIND_PARAKEET_STREAM          0x54534B50u
 /* 'PKBS' little-endian = 0x53424B50 */
 #define TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM 0x53424B50u
+/* 'PKBR' little-endian = 0x52424B50 */
+#define TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN        0x52424B50u
+
+/*
+ * Custom-vocabulary biasing (word boosting / shallow fusion), shared
+ * field block. Parakeet has no word vocabulary to extend — words are
+ * spelled from a fixed set of SentencePiece subword pieces — so
+ * "custom vocabulary" means boosting, at greedy-decode time, the token
+ * sequences that spell the caller's words (NVIDIA "TurboBias"-style
+ * phrase boosting reduced to greedy decoding: an Aho-Corasick automaton
+ * over the emitted tokens adds `boost` logit units to continuations of
+ * a live partial match and to word-start tokens, plus a completion
+ * bonus on word-final arcs; blank, the TDT duration head, and reported
+ * confidences are never touched).
+ *
+ *   bias_words / words
+ *
+ *     Array of `n` UTF-8 word/phrase strings, or NULL for no biasing.
+ *     Words are matched in their given casing plus ASCII-folded
+ *     lowercase / Capitalized variants; a word that cannot be spelled
+ *     with the model's pieces is skipped (with a WARN log). The array
+ *     and the strings are copied at the entry point (transcribe_run /
+ *     transcribe_stream_begin) — the caller may free them as soon as
+ *     the call returns.
+ *
+ *   bias_boost / boost
+ *
+ *     Additive logit boost per matched token, in logit units. The init
+ *     functions default it to 3.0f, the empirically tuned sweet spot
+ *     for parakeet-tdt-0.6b (≈1.8 flips nothing; ≈10 visibly
+ *     over-boosts). 0 disables biasing; negative values are accepted
+ *     (anti-boost) but untested.
+ */
 
 /*
  * Cache-aware streaming knob (nemotron-speech-streaming-en-0.6b).
@@ -61,9 +99,23 @@ extern "C" {
 struct transcribe_parakeet_stream_ext {
     struct transcribe_ext ext;
     int32_t               att_context_right;
+
+    /*
+     * v2 additive fields — custom-vocabulary biasing (see the shared
+     * field-block comment next to TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN).
+     * A caller compiled against the v1 layout passes the v1 sizeof in
+     * ext.size and the runtime treats these as absent (no biasing).
+     * The streaming automaton state persists across chunks within a
+     * stream (reset at transcribe_stream_begin), so a custom word split
+     * across a chunk boundary keeps its partial match.
+     */
+    const char * const * bias_words;
+    uint64_t             n_bias_words;
+    float                bias_boost;
 };
 
-/* Fills ext.size/kind and att_context_right = -1 (model default). */
+/* Fills ext.size/kind, att_context_right = -1 (model default), and the
+ * bias fields to NULL/0/3.0f (no biasing, default boost). */
 TRANSCRIBE_API void transcribe_parakeet_stream_ext_init(struct transcribe_parakeet_stream_ext * ext);
 
 /*
@@ -100,10 +152,39 @@ struct transcribe_parakeet_buffered_stream_ext {
     int32_t               left_ms;
     int32_t               chunk_ms;
     int32_t               right_ms;
+
+    /*
+     * v2 additive fields — custom-vocabulary biasing; identical
+     * semantics to transcribe_parakeet_stream_ext's bias fields (v1
+     * callers pass the v1 sizeof and get no biasing; automaton state
+     * persists across chunks, reset at transcribe_stream_begin).
+     */
+    const char * const * bias_words;
+    uint64_t             n_bias_words;
+    float                bias_boost;
 };
 
-/* Fills ext.size/kind and left/chunk/right_ms = -1 (model default). */
+/* Fills ext.size/kind, left/chunk/right_ms = -1 (model default), and
+ * the bias fields to NULL/0/3.0f (no biasing, default boost). */
 TRANSCRIBE_API void transcribe_parakeet_buffered_stream_ext_init(struct transcribe_parakeet_buffered_stream_ext * ext);
+
+/*
+ * Run-slot custom-vocabulary biasing for the offline decode paths
+ * (transcribe_run / transcribe_run_batch), accepted by every parakeet
+ * variant regardless of head kind (TDT / RNN-T / CTC). Field semantics
+ * are the shared bias block documented next to
+ * TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN; the automaton state is
+ * per-utterance (each run / batch item starts at the automaton root).
+ */
+struct transcribe_parakeet_bias_run_ext {
+    struct transcribe_ext ext;
+    const char * const *  words;
+    uint64_t              n_words;
+    float                 boost;
+};
+
+/* Fills ext.size/kind, words = NULL, n_words = 0, boost = 3.0f. */
+TRANSCRIBE_API void transcribe_parakeet_bias_run_ext_init(struct transcribe_parakeet_bias_run_ext * ext);
 
 #ifdef __cplusplus
 } /* extern "C" */
