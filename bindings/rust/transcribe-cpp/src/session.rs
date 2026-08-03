@@ -642,6 +642,27 @@ impl Stream<'_> {
         unsafe { sys::transcribe_stream_revision(self.session.ptr) }
     }
 
+    /// How many leading segments of the current [`snapshot`](Self::snapshot)
+    /// are committed (append-only; will not be rewritten by later feeds).
+    pub fn n_committed_segments(&self) -> i32 {
+        unsafe { sys::transcribe_stream_n_committed_segments(self.session.ptr) }
+    }
+
+    /// How many leading words of the current [`snapshot`](Self::snapshot)
+    /// are committed. Together with the snapshot's per-word `t0_ms` /
+    /// `t1_ms` this yields word-precise capture-clock time ranges for
+    /// newly committed text (diff against the count observed at the
+    /// previous revision).
+    pub fn n_committed_words(&self) -> i32 {
+        unsafe { sys::transcribe_stream_n_committed_words(self.session.ptr) }
+    }
+
+    /// How many leading tokens of the current [`snapshot`](Self::snapshot)
+    /// are committed.
+    pub fn n_committed_tokens(&self) -> i32 {
+        unsafe { sys::transcribe_stream_n_committed_tokens(self.session.ptr) }
+    }
+
     /// The stream's recorded terminal failure, or `None` while it is healthy.
     ///
     /// Set after a [`feed`](Self::feed) / [`finalize`](Self::finalize)

@@ -51,8 +51,29 @@ pub struct MoonshineStreamingOptions {
     pub min_decode_interval_ms: Option<i32>,
 }
 
+/// Parakeet custom-vocabulary biasing (word boosting / shallow fusion).
+///
+/// Boosts, at greedy-decode time, the token sequences that spell
+/// `words` so near-miss recognitions flip toward the intended spelling
+/// (blank, the TDT duration head, and reported confidences are never
+/// touched). Attach as [`RunExtension::ParakeetBias`] for offline
+/// `run`/`run_batch`, or through the `bias` field of the parakeet
+/// stream options for streaming (where the match state persists across
+/// chunks). A word that cannot be spelled with the model's pieces is
+/// skipped with a WARN log; a word containing an interior NUL byte is
+/// dropped at the FFI boundary.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(default))]
+pub struct ParakeetBiasOptions {
+    /// Words/phrases to boost. Empty = no biasing.
+    pub words: Vec<String>,
+    /// Additive logit boost per matched token. `None` keeps the library
+    /// default (3.0, the tuned sweet spot for parakeet-tdt-0.6b).
+    pub boost: Option<f32>,
+}
+
 /// Parakeet cache-aware streaming knobs (stream slot).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
@@ -60,10 +81,12 @@ pub struct MoonshineStreamingOptions {
 )]
 pub struct ParakeetStreamOptions {
     pub att_context_right: Option<i32>,
+    /// Custom-vocabulary biasing for the stream (see [`ParakeetBiasOptions`]).
+    pub bias: Option<ParakeetBiasOptions>,
 }
 
 /// Parakeet chunked-attention buffered streaming knobs (stream slot).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
@@ -73,6 +96,8 @@ pub struct ParakeetBufferedStreamOptions {
     pub left_ms: Option<i32>,
     pub chunk_ms: Option<i32>,
     pub right_ms: Option<i32>,
+    /// Custom-vocabulary biasing for the stream (see [`ParakeetBiasOptions`]).
+    pub bias: Option<ParakeetBiasOptions>,
 }
 
 /// Voxtral-realtime streaming knobs (stream slot).
@@ -179,10 +204,13 @@ impl DiarizeExtension {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RunExtension {
     Whisper(WhisperRunOptions),
+    /// Parakeet custom-vocabulary biasing (accepted by every parakeet
+    /// variant regardless of head kind).
+    ParakeetBias(ParakeetBiasOptions),
 }
 
 /// A family extension for the stream slot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StreamExtension {
@@ -201,6 +229,14 @@ pub(crate) enum RunExtRaw {
         ext: Box<sys::transcribe_whisper_run_ext>,
         _prompt: Option<CString>,
     },
+    ParakeetBias {
+        ext: Box<sys::transcribe_parakeet_bias_run_ext>,
+        // ext.words -> _ptrs' heap buffer -> _words' CString bytes. Vec
+        // moves relocate neither heap buffer, so the pointers stay valid
+        // for the holder's lifetime.
+        _words: Vec<CString>,
+        _ptrs: Vec<*const std::os::raw::c_char>,
+    },
 }
 
 impl RunExtRaw {
@@ -210,8 +246,25 @@ impl RunExtRaw {
             RunExtRaw::Whisper { ext, .. } => {
                 (&**ext) as *const sys::transcribe_whisper_run_ext as *const sys::transcribe_ext
             }
+            RunExtRaw::ParakeetBias { ext, .. } => {
+                (&**ext) as *const sys::transcribe_parakeet_bias_run_ext
+                    as *const sys::transcribe_ext
+            }
         }
     }
+}
+
+/// Materialize a word list for the C bias fields: CString keepalives +
+/// the pointer array the ext points at. Words with interior NUL bytes
+/// cannot cross the FFI boundary and are dropped (they could never be
+/// spelled by a SentencePiece vocabulary anyway).
+fn bias_words_raw(words: &[String]) -> (Vec<CString>, Vec<*const std::os::raw::c_char>) {
+    let cstrings: Vec<CString> = words
+        .iter()
+        .filter_map(|w| CString::new(w.as_str()).ok())
+        .collect();
+    let ptrs: Vec<*const std::os::raw::c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
+    (cstrings, ptrs)
 }
 
 impl RunExtension {
@@ -243,14 +296,38 @@ impl RunExtension {
                     _prompt: prompt,
                 })
             }
+            RunExtension::ParakeetBias(o) => {
+                let mut ext: sys::transcribe_parakeet_bias_run_ext = unsafe { std::mem::zeroed() };
+                unsafe { sys::transcribe_parakeet_bias_run_ext_init(&mut ext) };
+                let (words, ptrs) = bias_words_raw(&o.words);
+                if !ptrs.is_empty() {
+                    ext.words = ptrs.as_ptr();
+                    ext.n_words = ptrs.len() as u64;
+                }
+                set(&mut ext.boost, o.boost);
+                Ok(RunExtRaw::ParakeetBias {
+                    ext: Box::new(ext),
+                    _words: words,
+                    _ptrs: ptrs,
+                })
+            }
         }
     }
 }
 
-/// Owns a materialized stream-slot C extension struct (none carry strings).
+/// Owns a materialized stream-slot C extension struct (plus, for the
+/// parakeet variants, the bias word list it may point at).
 pub(crate) enum StreamExtRaw {
-    ParakeetStream(Box<sys::transcribe_parakeet_stream_ext>),
-    ParakeetBuffered(Box<sys::transcribe_parakeet_buffered_stream_ext>),
+    ParakeetStream {
+        ext: Box<sys::transcribe_parakeet_stream_ext>,
+        _words: Vec<CString>,
+        _ptrs: Vec<*const std::os::raw::c_char>,
+    },
+    ParakeetBuffered {
+        ext: Box<sys::transcribe_parakeet_buffered_stream_ext>,
+        _words: Vec<CString>,
+        _ptrs: Vec<*const std::os::raw::c_char>,
+    },
     MoonshineStreaming(Box<sys::transcribe_moonshine_streaming_stream_ext>),
     VoxtralRealtime(Box<sys::transcribe_voxtral_realtime_stream_ext>),
 }
@@ -258,11 +335,11 @@ pub(crate) enum StreamExtRaw {
 impl StreamExtRaw {
     pub(crate) fn ext_ptr(&self) -> *const sys::transcribe_ext {
         match self {
-            StreamExtRaw::ParakeetStream(e) => {
-                (&**e) as *const sys::transcribe_parakeet_stream_ext as *const sys::transcribe_ext
+            StreamExtRaw::ParakeetStream { ext, .. } => {
+                (&**ext) as *const sys::transcribe_parakeet_stream_ext as *const sys::transcribe_ext
             }
-            StreamExtRaw::ParakeetBuffered(e) => {
-                (&**e) as *const sys::transcribe_parakeet_buffered_stream_ext
+            StreamExtRaw::ParakeetBuffered { ext, .. } => {
+                (&**ext) as *const sys::transcribe_parakeet_buffered_stream_ext
                     as *const sys::transcribe_ext
             }
             StreamExtRaw::MoonshineStreaming(e) => {
@@ -284,7 +361,21 @@ impl StreamExtension {
                 let mut e: sys::transcribe_parakeet_stream_ext = unsafe { std::mem::zeroed() };
                 unsafe { sys::transcribe_parakeet_stream_ext_init(&mut e) };
                 set(&mut e.att_context_right, o.att_context_right);
-                StreamExtRaw::ParakeetStream(Box::new(e))
+                let (words, ptrs) = o
+                    .bias
+                    .as_ref()
+                    .map(|b| bias_words_raw(&b.words))
+                    .unwrap_or_default();
+                if !ptrs.is_empty() {
+                    e.bias_words = ptrs.as_ptr();
+                    e.n_bias_words = ptrs.len() as u64;
+                    set(&mut e.bias_boost, o.bias.as_ref().and_then(|b| b.boost));
+                }
+                StreamExtRaw::ParakeetStream {
+                    ext: Box::new(e),
+                    _words: words,
+                    _ptrs: ptrs,
+                }
             }
             StreamExtension::ParakeetBuffered(o) => {
                 let mut e: sys::transcribe_parakeet_buffered_stream_ext =
@@ -293,7 +384,21 @@ impl StreamExtension {
                 set(&mut e.left_ms, o.left_ms);
                 set(&mut e.chunk_ms, o.chunk_ms);
                 set(&mut e.right_ms, o.right_ms);
-                StreamExtRaw::ParakeetBuffered(Box::new(e))
+                let (words, ptrs) = o
+                    .bias
+                    .as_ref()
+                    .map(|b| bias_words_raw(&b.words))
+                    .unwrap_or_default();
+                if !ptrs.is_empty() {
+                    e.bias_words = ptrs.as_ptr();
+                    e.n_bias_words = ptrs.len() as u64;
+                    set(&mut e.bias_boost, o.bias.as_ref().and_then(|b| b.boost));
+                }
+                StreamExtRaw::ParakeetBuffered {
+                    ext: Box::new(e),
+                    _words: words,
+                    _ptrs: ptrs,
+                }
             }
             StreamExtension::MoonshineStreaming(o) => {
                 let mut e: sys::transcribe_moonshine_streaming_stream_ext =
