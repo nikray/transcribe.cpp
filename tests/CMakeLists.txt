@@ -219,6 +219,29 @@ transcribe_apply_warnings(transcribe_parakeet_longform_unit)
 add_test(NAME transcribe_parakeet_longform_unit COMMAND transcribe_parakeet_longform_unit)
 
 # -----------------------------------------------------------------------------
+# Parakeet vocab-bias automaton unit test
+# -----------------------------------------------------------------------------
+#
+# Validates the pure custom-vocabulary biasing core
+# (arch/parakeet/bias_automaton.{h,cpp}): greedy longest-match
+# segmentation, Aho-Corasick failure links, and the precomputed dense
+# bias rows the greedy decoders add onto token logits before argmax.
+
+add_executable(transcribe_parakeet_bias_automaton_unit
+    parakeet_bias_automaton_unit.cpp)
+
+target_link_libraries(transcribe_parakeet_bias_automaton_unit
+    PRIVATE transcribe ggml)
+
+target_include_directories(transcribe_parakeet_bias_automaton_unit
+    PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+transcribe_apply_warnings(transcribe_parakeet_bias_automaton_unit)
+
+add_test(NAME transcribe_parakeet_bias_automaton_unit
+    COMMAND transcribe_parakeet_bias_automaton_unit)
+
+# -----------------------------------------------------------------------------
 # Variable-length batch mask and causal subsampling unit test
 # -----------------------------------------------------------------------------
 

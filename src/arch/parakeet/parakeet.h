@@ -251,6 +251,11 @@ struct ParakeetStreamingDecoderState {
     // into stream-wide frame indices.
     int64_t frame_offset = 0;
 
+    // Vocab-bias automaton state (bias_automaton.h), carried across
+    // chunks so a custom word split on a chunk boundary keeps its
+    // partial match. 0 = automaton root; reset at stream_begin.
+    int32_t bias_state = 0;
+
     bool initialized = false;
 };
 
@@ -337,6 +342,17 @@ struct ParakeetSession final : public transcribe_session {
     transcribe_run_params stream_run_params{};
     // Convert from cumulative samples so odd feed sizes do not lose fractions.
     int64_t               stream_audio_input_samples = 0;
+
+    // ---- custom-vocabulary biasing (bias_automaton.h) ----
+    //
+    // run_bias is compiled per transcribe_run/_run_batch call from the
+    // PKBR run extension (cleared when the ext is absent); stream_bias
+    // is compiled at stream_begin from the stream extension's bias
+    // fields and lives for the whole stream. Both are const-after-
+    // compile; the mutable decode state is a plain int (per-call for
+    // offline, stream_dec_state.bias_state for streaming).
+    std::optional<BiasAutomaton> run_bias;
+    std::optional<BiasAutomaton> stream_bias;
 
     // ---- incremental streaming state (cache-aware) ----
     //

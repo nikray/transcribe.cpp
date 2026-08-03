@@ -353,6 +353,27 @@ int run_asr_batch(const cli_args & args, std::ofstream * output) {
         }
     }
 
+    // Parakeet run-slot vocab biasing (offline decode); see the
+    // single-file path for the streaming-ext counterpart. Allocated
+    // outside the per-file loop like wx so the bytes stay live.
+    struct transcribe_parakeet_bias_run_ext bias_rx;
+    transcribe_parakeet_bias_run_ext_init(&bias_rx);
+    std::vector<const char *> bias_ptrs;
+    for (const auto & w : args.bias_words) {
+        bias_ptrs.push_back(w.c_str());
+    }
+    if (!bias_ptrs.empty() &&
+        transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN)) {
+        bias_rx.words   = bias_ptrs.data();
+        bias_rx.n_words = bias_ptrs.size();
+        if (args.bias_boost_set) {
+            bias_rx.boost = args.bias_boost;
+        }
+        if (args.stream_chunk_ms <= 0) {
+            rp.family = &bias_rx.ext;
+        }
+    }
+
     if (args.keep_special_tags) {
         rp.keep_special_tags = true;
     }
@@ -538,20 +559,36 @@ int run_asr_batch(const cli_args & args, std::ofstream * output) {
                 transcribe_parakeet_buffered_stream_ext_init(&pkt_buf_sp);
                 struct transcribe_voxtral_realtime_stream_ext vx_sp;
                 transcribe_voxtral_realtime_stream_ext_init(&vx_sp);
+                const bool want_bias        = !bias_ptrs.empty();
                 const bool want_cache_aware = (args.stream_att_right >= 0);
                 const bool want_buffered =
                     args.stream_buf_left_ms >= 0 || args.stream_buf_chunk_ms >= 0 || args.stream_buf_right_ms >= 0;
-                if (want_cache_aware && transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
-                                                                          TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
-                    pkt_sp.att_context_right = args.stream_att_right;
-                    sp.family                = &pkt_sp.ext;
-                } else if (want_buffered &&
+                if (want_bias) {
+                    pkt_sp.bias_words       = bias_ptrs.data();
+                    pkt_sp.n_bias_words     = bias_ptrs.size();
+                    pkt_buf_sp.bias_words   = bias_ptrs.data();
+                    pkt_buf_sp.n_bias_words = bias_ptrs.size();
+                    if (args.bias_boost_set) {
+                        pkt_sp.bias_boost     = args.bias_boost;
+                        pkt_buf_sp.bias_boost = args.bias_boost;
+                    }
+                }
+                if ((want_cache_aware || want_bias) &&
+                    transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
+                                                      TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
+                    if (want_cache_aware) {
+                        pkt_sp.att_context_right = args.stream_att_right;
+                    }
+                    sp.family = &pkt_sp.ext;
+                } else if ((want_buffered || want_bias) &&
                            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
                                                              TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM)) {
-                    pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
-                    pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
-                    pkt_buf_sp.right_ms = args.stream_buf_right_ms;
-                    sp.family           = &pkt_buf_sp.ext;
+                    if (want_buffered) {
+                        pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
+                        pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
+                        pkt_buf_sp.right_ms = args.stream_buf_right_ms;
+                    }
+                    sp.family = &pkt_buf_sp.ext;
                 } else if (args.stream_voxtral_delay != -1 &&
                            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
                                                              TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM)) {
@@ -757,6 +794,27 @@ int run_asr_file(const cli_args &           args,
         }
     }
 
+    // Parakeet run-slot vocab biasing (offline decode); see the
+    // single-file path for the streaming-ext counterpart. Allocated
+    // outside the per-file loop like wx so the bytes stay live.
+    struct transcribe_parakeet_bias_run_ext bias_rx;
+    transcribe_parakeet_bias_run_ext_init(&bias_rx);
+    std::vector<const char *> bias_ptrs;
+    for (const auto & w : args.bias_words) {
+        bias_ptrs.push_back(w.c_str());
+    }
+    if (!bias_ptrs.empty() &&
+        transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN)) {
+        bias_rx.words   = bias_ptrs.data();
+        bias_rx.n_words = bias_ptrs.size();
+        if (args.bias_boost_set) {
+            bias_rx.boost = args.bias_boost;
+        }
+        if (args.stream_chunk_ms <= 0) {
+            rp.family = &bias_rx.ext;
+        }
+    }
+
     if (args.keep_special_tags) {
         rp.keep_special_tags = true;
     }
@@ -794,22 +852,41 @@ int run_asr_file(const cli_args &           args,
         transcribe_parakeet_buffered_stream_ext_init(&pkt_buf_sp);
         struct transcribe_voxtral_realtime_stream_ext vx_sp;
         transcribe_voxtral_realtime_stream_ext_init(&vx_sp);
+        const bool want_bias        = !bias_ptrs.empty();
         const bool want_cache_aware = (args.stream_att_right >= 0);
         const bool want_buffered =
             args.stream_buf_left_ms >= 0 || args.stream_buf_chunk_ms >= 0 || args.stream_buf_right_ms >= 0;
-        if (want_cache_aware &&
-            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM, TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
-            pkt_sp.att_context_right = args.stream_att_right;
-            sp.family                = &pkt_sp.ext;
-            std::printf("stream: att_context_right=%d\n", args.stream_att_right);
-        } else if (want_buffered && transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
-                                                                      TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM)) {
-            pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
-            pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
-            pkt_buf_sp.right_ms = args.stream_buf_right_ms;
-            sp.family           = &pkt_buf_sp.ext;
-            std::printf("stream: buffered (L,C,R)_ms=(%d,%d,%d)\n", args.stream_buf_left_ms, args.stream_buf_chunk_ms,
-                        args.stream_buf_right_ms);
+        if (want_bias) {
+            // Same word list on both parakeet stream ext shapes;
+            // whichever ext ends up attached carries it.
+            pkt_sp.bias_words       = bias_ptrs.data();
+            pkt_sp.n_bias_words     = bias_ptrs.size();
+            pkt_buf_sp.bias_words   = bias_ptrs.data();
+            pkt_buf_sp.n_bias_words = bias_ptrs.size();
+            if (args.bias_boost_set) {
+                pkt_sp.bias_boost     = args.bias_boost;
+                pkt_buf_sp.bias_boost = args.bias_boost;
+            }
+        }
+        if ((want_cache_aware || want_bias) &&
+            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
+                                              TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
+            if (want_cache_aware) {
+                pkt_sp.att_context_right = args.stream_att_right;
+                std::printf("stream: att_context_right=%d\n", args.stream_att_right);
+            }
+            sp.family = &pkt_sp.ext;
+        } else if ((want_buffered || want_bias) &&
+                   transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
+                                                     TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM)) {
+            if (want_buffered) {
+                pkt_buf_sp.left_ms  = args.stream_buf_left_ms;
+                pkt_buf_sp.chunk_ms = args.stream_buf_chunk_ms;
+                pkt_buf_sp.right_ms = args.stream_buf_right_ms;
+                std::printf("stream: buffered (L,C,R)_ms=(%d,%d,%d)\n", args.stream_buf_left_ms,
+                            args.stream_buf_chunk_ms, args.stream_buf_right_ms);
+            }
+            sp.family = &pkt_buf_sp.ext;
         } else if (args.stream_voxtral_delay != -1 &&
                    transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
                                                      TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM)) {

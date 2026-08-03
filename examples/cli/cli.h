@@ -67,6 +67,12 @@ struct cli_args {
     bool canary_pnc     = true;   // default: punctuation+caps on
     bool canary_pnc_set = false;  // --pnc / --no-pnc set this
 
+    // Parakeet custom-vocabulary biasing. Ignored by non-Parakeet
+    // families (the ext is attached only when the model accepts it).
+    std::vector<std::string> bias_words;            // --bias-words a,b,c
+    float                    bias_boost     = 0.0f; // --bias-boost F
+    bool                     bias_boost_set = false;
+
     // Speaker diarization toggle (moss / granite-plus). Unset = library
     // default (OFF). --diarize / --no-diarize set this.
     bool diarize     = true;
