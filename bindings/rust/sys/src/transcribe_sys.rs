@@ -12,6 +12,7 @@ pub const PUBLIC_HEADER_HASH: &str = "7df72bf9e667b8c2";
 pub const TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM: u32 = 1414746957;
 pub const TRANSCRIBE_EXT_KIND_PARAKEET_STREAM: u32 = 1414744912;
 pub const TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM: u32 = 1396853584;
+pub const TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN: u32 = 1380076368;
 pub const TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM: u32 = 1414743635;
 pub const TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM: u32 = 1414746710;
 pub const TRANSCRIBE_EXT_KIND_WHISPER_RUN: u32 = 1314015319;
@@ -1120,17 +1121,26 @@ unsafe extern "C" {
 pub struct transcribe_parakeet_stream_ext {
     pub ext: transcribe_ext,
     pub att_context_right: i32,
+    pub bias_words: *const *const ::std::os::raw::c_char,
+    pub n_bias_words: u64,
+    pub bias_boost: f32,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of transcribe_parakeet_stream_ext"]
-        [::std::mem::size_of::<transcribe_parakeet_stream_ext>() - 24usize];
+        [::std::mem::size_of::<transcribe_parakeet_stream_ext>() - 48usize];
     ["Alignment of transcribe_parakeet_stream_ext"]
         [::std::mem::align_of::<transcribe_parakeet_stream_ext>() - 8usize];
     ["Offset of field: transcribe_parakeet_stream_ext::ext"]
         [::std::mem::offset_of!(transcribe_parakeet_stream_ext, ext) - 0usize];
     ["Offset of field: transcribe_parakeet_stream_ext::att_context_right"]
         [::std::mem::offset_of!(transcribe_parakeet_stream_ext, att_context_right) - 16usize];
+    ["Offset of field: transcribe_parakeet_stream_ext::bias_words"]
+        [::std::mem::offset_of!(transcribe_parakeet_stream_ext, bias_words) - 24usize];
+    ["Offset of field: transcribe_parakeet_stream_ext::n_bias_words"]
+        [::std::mem::offset_of!(transcribe_parakeet_stream_ext, n_bias_words) - 32usize];
+    ["Offset of field: transcribe_parakeet_stream_ext::bias_boost"]
+        [::std::mem::offset_of!(transcribe_parakeet_stream_ext, bias_boost) - 40usize];
 };
 unsafe extern "C" {
     pub fn transcribe_parakeet_stream_ext_init(ext: *mut transcribe_parakeet_stream_ext);
@@ -1142,11 +1152,14 @@ pub struct transcribe_parakeet_buffered_stream_ext {
     pub left_ms: i32,
     pub chunk_ms: i32,
     pub right_ms: i32,
+    pub bias_words: *const *const ::std::os::raw::c_char,
+    pub n_bias_words: u64,
+    pub bias_boost: f32,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of transcribe_parakeet_buffered_stream_ext"]
-        [::std::mem::size_of::<transcribe_parakeet_buffered_stream_ext>() - 32usize];
+        [::std::mem::size_of::<transcribe_parakeet_buffered_stream_ext>() - 56usize];
     ["Alignment of transcribe_parakeet_buffered_stream_ext"]
         [::std::mem::align_of::<transcribe_parakeet_buffered_stream_ext>() - 8usize];
     ["Offset of field: transcribe_parakeet_buffered_stream_ext::ext"]
@@ -1157,11 +1170,43 @@ const _: () = {
         [::std::mem::offset_of!(transcribe_parakeet_buffered_stream_ext, chunk_ms) - 20usize];
     ["Offset of field: transcribe_parakeet_buffered_stream_ext::right_ms"]
         [::std::mem::offset_of!(transcribe_parakeet_buffered_stream_ext, right_ms) - 24usize];
+    ["Offset of field: transcribe_parakeet_buffered_stream_ext::bias_words"]
+        [::std::mem::offset_of!(transcribe_parakeet_buffered_stream_ext, bias_words) - 32usize];
+    ["Offset of field: transcribe_parakeet_buffered_stream_ext::n_bias_words"]
+        [::std::mem::offset_of!(transcribe_parakeet_buffered_stream_ext, n_bias_words) - 40usize];
+    ["Offset of field: transcribe_parakeet_buffered_stream_ext::bias_boost"]
+        [::std::mem::offset_of!(transcribe_parakeet_buffered_stream_ext, bias_boost) - 48usize];
 };
 unsafe extern "C" {
     pub fn transcribe_parakeet_buffered_stream_ext_init(
         ext: *mut transcribe_parakeet_buffered_stream_ext,
     );
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct transcribe_parakeet_bias_run_ext {
+    pub ext: transcribe_ext,
+    pub words: *const *const ::std::os::raw::c_char,
+    pub n_words: u64,
+    pub boost: f32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of transcribe_parakeet_bias_run_ext"]
+        [::std::mem::size_of::<transcribe_parakeet_bias_run_ext>() - 40usize];
+    ["Alignment of transcribe_parakeet_bias_run_ext"]
+        [::std::mem::align_of::<transcribe_parakeet_bias_run_ext>() - 8usize];
+    ["Offset of field: transcribe_parakeet_bias_run_ext::ext"]
+        [::std::mem::offset_of!(transcribe_parakeet_bias_run_ext, ext) - 0usize];
+    ["Offset of field: transcribe_parakeet_bias_run_ext::words"]
+        [::std::mem::offset_of!(transcribe_parakeet_bias_run_ext, words) - 16usize];
+    ["Offset of field: transcribe_parakeet_bias_run_ext::n_words"]
+        [::std::mem::offset_of!(transcribe_parakeet_bias_run_ext, n_words) - 24usize];
+    ["Offset of field: transcribe_parakeet_bias_run_ext::boost"]
+        [::std::mem::offset_of!(transcribe_parakeet_bias_run_ext, boost) - 32usize];
+};
+unsafe extern "C" {
+    pub fn transcribe_parakeet_bias_run_ext_init(ext: *mut transcribe_parakeet_bias_run_ext);
 }
 impl transcribe_sortformer_preset {
     pub const TRANSCRIBE_SORTFORMER_PRESET_DEFAULT: transcribe_sortformer_preset =

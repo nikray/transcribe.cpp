@@ -11,7 +11,7 @@ use crate::result::owned_str;
 use crate::types::CommitPolicy;
 
 /// Options for beginning a stream.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct StreamOptions {
     /// When committed text grows. Default [`CommitPolicy::Auto`].
     pub commit_policy: CommitPolicy,
