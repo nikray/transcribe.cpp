@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include "bias_automaton.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "transcribe.h"
@@ -211,6 +212,14 @@ struct TdtToken {
 //              ne=[d_enc, T_enc, 1, 1] read via tensor_get).
 //   T_enc    - number of encoder frames
 //   d_enc    - encoder d_model (must equal w.joint.d_enc)
+//   bias     - optional custom-vocabulary boosting automaton (see
+//              bias_automaton.h). When non-null and non-empty its dense
+//              per-state row is added onto the token logits before the
+//              token argmax; the duration argmax and the reported
+//              confidences read the unbiased logits. The automaton
+//              state starts at root and advances per non-blank
+//              emission; it is per-call (matching the reference
+//              implementation: no carry across decode calls).
 // Outputs:
 //   out_tokens - appended with one TdtToken per non-blank emission
 //
@@ -221,19 +230,22 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights & w,
                                     int                        T_enc,
                                     int                        d_enc,
                                     int                        n_threads,
-                                    std::vector<TdtToken> &    out_tokens);
+                                    std::vector<TdtToken> &    out_tokens,
+                                    const BiasAutomaton *      bias = nullptr);
 
 // Run RNNT greedy decode end-to-end. Same predictor + joint code as TDT,
 // but the joint emits `vocab+1` logits (no duration extras) and the step
 // rule is "blank → advance one frame, non-blank → emit + stay, capped by
 // tdt_max_symbols". Per-emit duration_frames is fixed at 1. Same I/O
-// contract and TdtToken result type as decode_tdt_greedy.
+// contract (including the optional `bias` automaton) and TdtToken result
+// type as decode_tdt_greedy.
 transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
                                      const float *              enc_out,
                                      int                        T_enc,
                                      int                        d_enc,
                                      int                        n_threads,
-                                     std::vector<TdtToken> &    out_tokens);
+                                     std::vector<TdtToken> &    out_tokens,
+                                     const BiasAutomaton *      bias = nullptr);
 
 // Streaming variant of RNN-T greedy decode. Consumes T_enc_new encoder
 // frames (the chunk just produced) and APPENDS emitted tokens to
@@ -242,6 +254,13 @@ transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
 // index of this chunk's first frame (so step_at_emit lands in
 // stream-wide coordinates). state_io must have been reset to a fresh
 // start-of-sequence state at stream_begin (last_token_io = -1).
+//
+// Bias: unlike the offline decoders, the automaton state persists
+// ACROSS chunks via *bias_state_io (reset to 0 at stream_begin
+// alongside the LSTM state), so a custom word split across a chunk
+// boundary keeps its partial match. Both `bias` and `bias_state_io`
+// must be non-null to enable biasing; an out-of-range *bias_state_io
+// is treated as root.
 transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
                                                const float *              enc_out,
                                                int                        T_enc_new,
@@ -250,18 +269,26 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
                                                int &                      last_token_io,
                                                int                        frame_offset,
                                                int                        n_threads,
-                                               std::vector<TdtToken> &    out_tokens);
+                                               std::vector<TdtToken> &    out_tokens,
+                                               const BiasAutomaton *      bias          = nullptr,
+                                               int *                      bias_state_io = nullptr);
 
 // Run CTC greedy decode end-to-end. Per-frame: logits = W @ enc[t] + b,
 // argmax; collapse rule "drop adjacent duplicates, then drop blanks"
 // (standard CTC greedy, cf. NeMo GreedyCTCInfer). step_at_emit is the
 // post-collapse encoder-frame index; duration_frames = 1. Same TdtToken
 // result type as the transducer paths.
+//
+// Bias: the per-state row is added onto each frame's log-probs before
+// the frame argmax (an additive shift in log space, so the collapse
+// rule is unchanged); the automaton advances on post-collapse non-blank
+// emissions and confidences read the unbiased log-probs.
 transcribe_status decode_ctc_greedy(const HostDecoderWeights & w,
                                     const float *              enc_out,
                                     int                        T_enc,
                                     int                        d_enc,
                                     int                        n_threads,
-                                    std::vector<TdtToken> &    out_tokens);
+                                    std::vector<TdtToken> &    out_tokens,
+                                    const BiasAutomaton *      bias = nullptr);
 
 }  // namespace transcribe::parakeet

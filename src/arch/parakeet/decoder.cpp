@@ -956,6 +956,39 @@ int argmax_range(const float * data, int n) {
     return best_i;
 }
 
+// Argmax over data[i] + bias_row[i], computed on the fly so the caller's
+// logits stay unbiased (the confidence path re-reads them). Same
+// first-occurrence tie rule as argmax_range.
+int argmax_range_biased(const float * data, int n, const float * bias_row) {
+    int   best_i = 0;
+    float best_v = data[0] + bias_row[0];
+    for (int i = 1; i < n; ++i) {
+        const float v = data[i] + bias_row[i];
+        if (v > best_v) {
+            best_v = v;
+            best_i = i;
+        }
+    }
+    return best_i;
+}
+
+// True when `bias` is usable for a decode over `n_token_classes` logit
+// slots. A width mismatch means the automaton was compiled against a
+// different head/vocab — decode unbiased rather than misapply rows.
+bool bias_usable(const BiasAutomaton * bias, int n_token_classes) {
+    if (bias == nullptr || bias->empty()) {
+        return false;
+    }
+    if (bias->width() != n_token_classes) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                "parakeet decoder: bias automaton width %d != token "
+                "classes %d; ignoring bias",
+                bias->width(), n_token_classes);
+        return false;
+    }
+    return true;
+}
+
 // Entropy-based confidence over a token-logit slice. Mirrors the
 // reference ParakeetTDT.decode_greedy path:
 //
@@ -1010,7 +1043,8 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights & w,
                                     int                        T_enc,
                                     int                        d_enc,
                                     int                        n_threads,
-                                    std::vector<TdtToken> &    out_tokens) {
+                                    std::vector<TdtToken> &    out_tokens,
+                                    const BiasAutomaton *      bias) {
     if (enc_out == nullptr || T_enc <= 0 || d_enc <= 0) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
@@ -1075,6 +1109,12 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights & w,
     int step        = 0;
     int new_symbols = 0;
 
+    // Custom-vocabulary boosting (see bias_automaton.h). The automaton
+    // state is per decode call: fresh start at root here, advanced per
+    // non-blank emission below.
+    const bool use_bias   = bias_usable(bias, n_token_cls);
+    int        bias_state = 0;
+
     // Runaway-protection cap; legitimate transcriptions never approach it.
     const int max_iters = 16 * T_enc + 1024;
     int       iter      = 0;
@@ -1109,10 +1149,15 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights & w,
         t_joint_us += t2 - t1;
 
         // ----- Argmax (token + duration) -----
+        //
+        // The bias row shifts only the token argmax; the duration head
+        // (the tail beyond n_token_cls) and the confidence computation
+        // below both read the unbiased logits.
         const float * token_logits    = logits.data();
         const float * duration_logits = logits.data() + n_token_cls;
 
-        const int pred_token = argmax_range(token_logits, n_token_cls);
+        const int pred_token = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state)) :
+                                          argmax_range(token_logits, n_token_cls);
         const int decision   = argmax_range(duration_logits, n_dur);
         const int duration   = w.tdt_durations[static_cast<size_t>(decision)];
 
@@ -1153,6 +1198,9 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights & w,
             last_token = pred_token;
             std::swap(state, next_state);  // commit
             predictor_dirty = true;
+            if (use_bias) {
+                bias_state = bias->advance(bias_state, pred_token);
+            }
         }
 
         // Step / stuck advance. Matches the reference:
@@ -1229,7 +1277,8 @@ transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
                                      int                        T_enc,
                                      int                        d_enc,
                                      int                        n_threads,
-                                     std::vector<TdtToken> &    out_tokens) {
+                                     std::vector<TdtToken> &    out_tokens,
+                                     const BiasAutomaton *      bias) {
     if (enc_out == nullptr || T_enc <= 0 || d_enc <= 0) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
@@ -1282,6 +1331,10 @@ transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
     int step        = 0;
     int new_symbols = 0;
 
+    // Custom-vocabulary boosting; per-call state (see decode_tdt_greedy).
+    const bool use_bias   = bias_usable(bias, n_token_cls);
+    int        bias_state = 0;
+
     const int max_iters = 16 * T_enc + 1024;
     int       iter      = 0;
     int64_t   t_pred_us = 0, t_joint_us = 0, t_conf_us = 0;
@@ -1310,9 +1363,12 @@ transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
         t_pred_us += t1 - t0;
         t_joint_us += t2 - t1;
 
-        // RNNT joint output is just `n_token_cls` floats (no duration extras).
+        // RNNT joint output is just `n_token_cls` floats (no duration
+        // extras). Bias shifts only the argmax; confidence below reads
+        // the unbiased logits.
         const float * token_logits = logits.data();
-        const int     pred_token   = argmax_range(token_logits, n_token_cls);
+        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state)) :
+                                                argmax_range(token_logits, n_token_cls);
 
         if (iter == 1 && transcribe::debug::enabled()) {
             const long long s_h = H;
@@ -1347,6 +1403,9 @@ transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
             last_token = pred_token;
             std::swap(state, next_state);
             predictor_dirty = true;
+            if (use_bias) {
+                bias_state = bias->advance(bias_state, pred_token);
+            }
 
             new_symbols += 1;
             if (w.tdt_max_symbols > 0 && new_symbols >= w.tdt_max_symbols) {
@@ -1389,7 +1448,9 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
                                                int &                      last_token_io,
                                                int                        frame_offset,
                                                int                        n_threads,
-                                               std::vector<TdtToken> &    out_tokens) {
+                                               std::vector<TdtToken> &    out_tokens,
+                                               const BiasAutomaton *      bias,
+                                               int *                      bias_state_io) {
     if (enc_out == nullptr || T_enc_new <= 0 || d_enc <= 0) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
@@ -1465,6 +1526,13 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
     int step        = 0;
     int new_symbols = 0;
 
+    // Custom-vocabulary boosting. Unlike the offline decoders the
+    // automaton state carries across chunks through *bias_state_io
+    // (reset at stream_begin with the LSTM state), so a custom word
+    // split across a chunk boundary keeps its partial match.
+    const bool use_bias   = bias_state_io != nullptr && bias_usable(bias, n_token_cls);
+    int        bias_state = use_bias ? *bias_state_io : 0;
+
     const int max_iters = 16 * T_enc_new + 1024;
     int       iter      = 0;
 
@@ -1485,7 +1553,8 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
         joint_step(w.joint, jg, enc_proj, decoder_out, logits);
 
         const float * token_logits = logits.data();
-        const int     pred_token   = argmax_range(token_logits, n_token_cls);
+        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state)) :
+                                                argmax_range(token_logits, n_token_cls);
 
         const bool is_blank = (pred_token == blank_id);
         if (is_blank) {
@@ -1503,6 +1572,9 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
             last_token = pred_token;
             std::swap(state, next_state);
             predictor_dirty = true;
+            if (use_bias) {
+                bias_state = bias->advance(bias_state, pred_token);
+            }
 
             new_symbols += 1;
             if (w.tdt_max_symbols > 0 && new_symbols >= w.tdt_max_symbols) {
@@ -1521,6 +1593,9 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
     // non-blank state (the predictor's "current" since the last emit).
     state_io      = std::move(state);
     last_token_io = last_token;
+    if (use_bias) {
+        *bias_state_io = bias_state;
+    }
     return TRANSCRIBE_OK;
 }
 
@@ -1534,7 +1609,8 @@ transcribe_status decode_ctc_greedy(const HostDecoderWeights & w,
                                     int                        T_enc,
                                     int                        d_enc,
                                     int                        n_threads,
-                                    std::vector<TdtToken> &    out_tokens) {
+                                    std::vector<TdtToken> &    out_tokens,
+                                    const BiasAutomaton *      bias) {
     if (enc_out == nullptr || T_enc <= 0 || d_enc <= 0) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
@@ -1622,10 +1698,21 @@ transcribe_status decode_ctc_greedy(const HostDecoderWeights & w,
     // Greedy collapse: drop runs of identical labels, then drop blanks.
     // Per-emit `step_at_emit` is the encoder frame at which the label
     // first changed; duration_frames = 1.
+    //
+    // Custom-vocabulary boosting: the per-state bias row is added onto
+    // each frame's log-probs before the frame argmax (a per-class
+    // additive shift; the collapse rule is untouched). The automaton
+    // advances on post-collapse non-blank emissions — the same
+    // token-sequence semantics as the transducer paths — and the
+    // reported confidence stays exp(unbiased log-prob of the label).
+    const bool use_bias   = bias_usable(bias, n_classes);
+    int        bias_state = 0;
+
     int prev_label = -1;
     for (int t = 0; t < T_enc; ++t) {
         const float * row   = logits_all.data() + static_cast<size_t>(t) * static_cast<size_t>(n_classes);
-        const int     label = argmax_range(row, n_classes);
+        const int     label = use_bias ? argmax_range_biased(row, n_classes, bias->row(bias_state)) :
+                                         argmax_range(row, n_classes);
         if (label == prev_label) {
             continue;  // run-length collapse
         }
@@ -1641,6 +1728,9 @@ transcribe_status decode_ctc_greedy(const HostDecoderWeights & w,
         tok.step_at_emit    = t;
         tok.duration_frames = 1;
         out_tokens.push_back(tok);
+        if (use_bias) {
+            bias_state = bias->advance(bias_state, label);
+        }
     }
 
     log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG, "decoder (ctc): T_enc=%d  proj=%.1f ms  emitted=%d", T_enc, t_proj_us / 1000.0,

@@ -379,6 +379,7 @@ void reset_streaming_decoder_state(ParakeetSession * pc, const ParakeetModel * p
     pc->stream_dec_state.lstm_state.reset(n_layers, pred_hidden);
     pc->stream_dec_state.prev_token_id = -1;
     pc->stream_dec_state.frame_offset  = 0;
+    pc->stream_dec_state.bias_state    = 0;  // vocab-bias automaton root
     pc->stream_dec_state.initialized   = true;
 }
 
@@ -665,6 +666,113 @@ static double parakeet_ms_per_enc_frame(const ParakeetHParams & hp) {
            static_cast<double>(hp.fe_sample_rate);
 }
 
+// Compile a caller word list into a custom-vocabulary boosting automaton
+// against this model's piece table (see bias_automaton.h). Shared by the
+// run-slot extension (per-call) and the stream extensions' bias fields
+// (per-stream). Returns std::nullopt when there is nothing to bias —
+// no words, no spellable words, or a zero boost.
+static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel * pm,
+                                                           const char * const *  words,
+                                                           uint64_t              n_words,
+                                                           float                 boost) {
+    if (words == nullptr || n_words == 0 || boost == 0.0f) {
+        return std::nullopt;
+    }
+    std::vector<std::string> word_list;
+    word_list.reserve(static_cast<size_t>(n_words));
+    for (uint64_t i = 0; i < n_words; ++i) {
+        if (words[i] != nullptr && words[i][0] != '\0') {
+            word_list.emplace_back(words[i]);
+        }
+    }
+    if (word_list.empty()) {
+        return std::nullopt;
+    }
+
+    // Materialize the id→piece table once per compile (~1k short strings).
+    const transcribe::Tokenizer & tok      = pm->tok;
+    const int                     n_pieces = tok.n_tokens();
+    std::vector<std::string>      pieces;
+    pieces.reserve(static_cast<size_t>(n_pieces));
+    for (int i = 0; i < n_pieces; ++i) {
+        pieces.push_back(tok.token(i));
+    }
+
+    BiasSegmentation segd = bias_segment_vocabulary(word_list, pieces);
+    if (!segd.failed.empty()) {
+        std::string skipped;
+        for (size_t i = 0; i < segd.failed.size() && i < 10; ++i) {
+            if (i != 0) {
+                skipped += ", ";
+            }
+            skipped += segd.failed[i];
+        }
+        log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                "parakeet bias: %zu word(s) not spellable with this "
+                "model's pieces, skipped: %s",
+                segd.failed.size(), skipped.c_str());
+    }
+    if (segd.seqs.empty()) {
+        return std::nullopt;
+    }
+
+    // Row width = token classes incl. blank, uniform across head kinds
+    // (TDT/RNNT: pred_vocab; CTC: n_classes; blank always at width-1).
+    const int     width = pm->host_decoder.blank_id + 1;
+    BiasAutomaton a     = BiasAutomaton::build(segd.seqs, width, boost);
+    if (a.empty()) {
+        return std::nullopt;
+    }
+    log_msg(TRANSCRIBE_LOG_LEVEL_INFO,
+            "parakeet bias: compiled %zu token sequence(s) from %zu "
+            "word(s), boost=%.2f",
+            segd.seqs.size(), word_list.size(), static_cast<double>(boost));
+    return a;
+}
+
+// Parse the run-slot bias extension (PKBR) off `params` and refresh
+// pc->run_bias accordingly (cleared when the ext is absent, so a
+// previous call's word list never leaks into an ext-less call). The
+// dispatcher has already matched kind acceptance; this validates the
+// struct shape.
+static transcribe_status refresh_run_bias(ParakeetSession * pc, const ParakeetModel * pm,
+                                          const transcribe_run_params * params) {
+    pc->run_bias.reset();
+    const transcribe_ext * family = params != nullptr ? params->family : nullptr;
+    if (family == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    if (const transcribe_status st = transcribe_ext_check(family, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN,
+                                                          sizeof(struct transcribe_parakeet_bias_run_ext));
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+    const auto * bx = reinterpret_cast<const transcribe_parakeet_bias_run_ext *>(family);
+    pc->run_bias    = compile_bias_automaton(pm, bx->words, bx->n_words, bx->boost);
+    return TRANSCRIBE_OK;
+}
+
+// Read the v2 bias fields off a stream extension — only when the
+// caller's struct is new enough to carry them (ext.size gate; a v1
+// caller gets no biasing) — and refresh pc->stream_bias for the
+// stream that is being begun. `family` has already passed
+// transcribe_ext_check for its kind in the geometry resolvers.
+static void refresh_stream_bias(ParakeetSession * pc, const ParakeetModel * pm, const transcribe_ext * family) {
+    pc->stream_bias.reset();
+    if (family == nullptr) {
+        return;
+    }
+    if (family->kind == TRANSCRIBE_EXT_KIND_PARAKEET_STREAM &&
+        family->size >= sizeof(struct transcribe_parakeet_stream_ext)) {
+        const auto * px = reinterpret_cast<const transcribe_parakeet_stream_ext *>(family);
+        pc->stream_bias = compile_bias_automaton(pm, px->bias_words, px->n_bias_words, px->bias_boost);
+    } else if (family->kind == TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM &&
+               family->size >= sizeof(struct transcribe_parakeet_buffered_stream_ext)) {
+        const auto * px = reinterpret_cast<const transcribe_parakeet_buffered_stream_ext *>(family);
+        pc->stream_bias = compile_bias_automaton(pm, px->bias_words, px->n_bias_words, px->bias_boost);
+    }
+}
+
 // Host-side TDT/RNNT/CTC decode + public result-hierarchy build for one
 // utterance's encoder output. `enc` is the row-major [T_enc, d_enc]
 // activation for ONE utterance; utt_index >= 0 tags the per-utterance
@@ -700,16 +808,20 @@ static transcribe_status decode_and_populate(ParakeetSession *             pc,
     pc->raw_tokens.clear();
     const int64_t t_dec_start = ggml_time_us();
     {
+        // Vocab-bias automaton from the run-slot extension (if any);
+        // per-utterance state lives inside the decode call.
+        const BiasAutomaton * bias = pc->run_bias.has_value() ? &*pc->run_bias : nullptr;
+
         transcribe_status st = TRANSCRIBE_OK;
         switch (pm->host_decoder.head_kind) {
             case HostHeadKind::TDT:
-                st = decode_tdt_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens);
+                st = decode_tdt_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens, bias);
                 break;
             case HostHeadKind::RNNT:
-                st = decode_rnnt_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens);
+                st = decode_rnnt_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens, bias);
                 break;
             case HostHeadKind::CTC:
-                st = decode_ctc_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens);
+                st = decode_ctc_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens, bias);
                 break;
         }
         if (st != TRANSCRIBE_OK) {
@@ -1205,6 +1317,10 @@ transcribe_status run(transcribe_session *          session,
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
 
+    if (const transcribe_status st = refresh_run_bias(pc, pm, params); st != TRANSCRIBE_OK) {
+        return st;
+    }
+
     pc->clear_result();
     return run_one_shot_inner(pc, pm, pcm, n_samples, params);
 }
@@ -1483,6 +1599,9 @@ transcribe_status run_batch(transcribe_session *          session,
     auto * pm = static_cast<ParakeetModel *>(pc->model);
     if (pm == nullptr || pm->plan.scheduler_list.empty() || !pm->mel.has_value()) {
         return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    if (const transcribe_status st = refresh_run_bias(pc, pm, params); st != TRANSCRIBE_OK) {
+        return st;
     }
     transcribe::debug::init();
 
@@ -2019,7 +2138,8 @@ transcribe_status emit_streaming_chunk(ParakeetSession * pc,
     if (const transcribe_status st = decode_rnnt_greedy_streaming(
             pm->host_decoder, pc->enc_host.data(), T_q_new, d_enc, pc->stream_dec_state.lstm_state,
             pc->stream_dec_state.prev_token_id, static_cast<int>(pc->stream_dec_state.frame_offset), pc->n_threads,
-            pc->raw_tokens);
+            pc->raw_tokens, pc->stream_bias.has_value() ? &*pc->stream_bias : nullptr,
+            &pc->stream_dec_state.bias_state);
         st != TRANSCRIBE_OK) {
         return st;
     }
@@ -2403,7 +2523,8 @@ transcribe_status emit_buffered_chunk(ParakeetSession * pc,
     if (const transcribe_status st = decode_rnnt_greedy_streaming(
             pm->host_decoder, enc_chunk, T_to_decode, d_enc, pc->stream_dec_state.lstm_state,
             pc->stream_dec_state.prev_token_id, static_cast<int>(pc->stream_dec_state.frame_offset), pc->n_threads,
-            pc->raw_tokens);
+            pc->raw_tokens, pc->stream_bias.has_value() ? &*pc->stream_bias : nullptr,
+            &pc->stream_dec_state.bias_state);
         st != TRANSCRIBE_OK) {
         return st;
     }
@@ -2440,8 +2561,12 @@ transcribe_status resolve_buffered_stream_geom(const ParakeetModel *            
 
     int                    req_L_ms = -1, req_C_ms = -1, req_R_ms = -1;
     const transcribe_ext * family = stream_params != nullptr ? stream_params->family : nullptr;
-    if (const transcribe_status st = transcribe_ext_check(family, TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM,
-                                                          sizeof(struct transcribe_parakeet_buffered_stream_ext));
+    // min_size is the v1 layout (through right_ms): a caller compiled
+    // before the additive bias fields still passes; the bias fields are
+    // read only when ext.size says they exist (see refresh_stream_bias).
+    if (const transcribe_status st =
+            transcribe_ext_check(family, TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM,
+                                 offsetof(struct transcribe_parakeet_buffered_stream_ext, bias_words));
         st != TRANSCRIBE_OK) {
         return st;
     }
@@ -2529,8 +2654,10 @@ transcribe_status resolve_cache_aware_stream_geom(const ParakeetModel *         
     int chosen_left  = pm->hparams.enc_att_context_left;
 
     const transcribe_ext * family = stream_params != nullptr ? stream_params->family : nullptr;
+    // min_size is the v1 layout (through att_context_right); see the
+    // buffered resolver for the additive-fields rationale.
     if (const transcribe_status st = transcribe_ext_check(family, TRANSCRIBE_EXT_KIND_PARAKEET_STREAM,
-                                                          sizeof(struct transcribe_parakeet_stream_ext));
+                                                          offsetof(struct transcribe_parakeet_stream_ext, bias_words));
         st != TRANSCRIBE_OK) {
         return st;
     }
@@ -2664,6 +2791,7 @@ transcribe_status stream_begin(transcribe_session *             session,
         reset_streaming_decoder_state(pc, pm);
         // frame_offset starts at 0, advanced per-chunk by T_to_decode.
         pc->stream_dec_state.frame_offset = 0;
+        refresh_stream_bias(pc, pm, stream_params != nullptr ? stream_params->family : nullptr);
 
         return TRANSCRIBE_OK;
     }
@@ -2692,6 +2820,7 @@ transcribe_status stream_begin(transcribe_session *             session,
     }
     zero_streaming_caches(pc);
     reset_streaming_decoder_state(pc, pm);
+    refresh_stream_bias(pc, pm, stream_params != nullptr ? stream_params->family : nullptr);
 
     // Resolve chunking geometry (NeMo's setup_streaming_params):
     //   chunk_size_subsequent = subsampling_factor * (1 + R)
@@ -3091,12 +3220,16 @@ void stream_reset(transcribe_session * session) {
     pc->stream_pcm_buffer.clear();  // keep the allocation
 }
 
-// Kind+slot probe. No run-slot extensions (always false on _RUN). On
-// _STREAM: ChunkedLimited takes PARAKEET_STREAM, ChunkedLimitedWithRc
-// takes PARAKEET_BUFFERED_STREAM, offline variants neither.
+// Kind+slot probe. On _RUN every variant (any head kind) takes
+// PARAKEET_BIAS_RUN (custom-vocabulary boosting). On _STREAM:
+// ChunkedLimited takes PARAKEET_STREAM, ChunkedLimitedWithRc takes
+// PARAKEET_BUFFERED_STREAM, offline variants neither.
 bool accepts_ext_kind(const transcribe_model * model, transcribe_ext_slot slot, uint32_t kind) {
     if (model == nullptr) {
         return false;
+    }
+    if (slot == TRANSCRIBE_EXT_SLOT_RUN) {
+        return kind == TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN;
     }
     if (slot != TRANSCRIBE_EXT_SLOT_STREAM) {
         return false;
@@ -3147,6 +3280,9 @@ extern "C" void transcribe_parakeet_stream_ext_init(struct transcribe_parakeet_s
     p->ext.size          = sizeof(*p);
     p->ext.kind          = TRANSCRIBE_EXT_KIND_PARAKEET_STREAM;
     p->att_context_right = -1;  // model default (max accuracy / max latency)
+    p->bias_words        = nullptr;  // no biasing
+    p->n_bias_words      = 0;
+    p->bias_boost        = transcribe::parakeet::BIAS_DEFAULT_BOOST;
 }
 
 extern "C" void transcribe_parakeet_buffered_stream_ext_init(struct transcribe_parakeet_buffered_stream_ext * p) {
@@ -3154,9 +3290,24 @@ extern "C" void transcribe_parakeet_buffered_stream_ext_init(struct transcribe_p
         return;
     }
     std::memset(p, 0, sizeof(*p));
+    p->ext.size     = sizeof(*p);
+    p->ext.kind     = TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM;
+    p->left_ms      = -1;  // model default
+    p->chunk_ms     = -1;
+    p->right_ms     = -1;
+    p->bias_words   = nullptr;  // no biasing
+    p->n_bias_words = 0;
+    p->bias_boost   = transcribe::parakeet::BIAS_DEFAULT_BOOST;
+}
+
+extern "C" void transcribe_parakeet_bias_run_ext_init(struct transcribe_parakeet_bias_run_ext * p) {
+    if (p == nullptr) {
+        return;
+    }
+    std::memset(p, 0, sizeof(*p));
     p->ext.size = sizeof(*p);
-    p->ext.kind = TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM;
-    p->left_ms  = -1;  // model default
-    p->chunk_ms = -1;
-    p->right_ms = -1;
+    p->ext.kind = TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN;
+    p->words    = nullptr;  // no biasing
+    p->n_words  = 0;
+    p->boost    = transcribe::parakeet::BIAS_DEFAULT_BOOST;
 }
