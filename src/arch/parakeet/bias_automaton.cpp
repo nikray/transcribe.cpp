@@ -184,23 +184,29 @@ BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs, i
 
     // Dense per-state bias rows, precomputed so decode-time lookups are
     // a plain pointer read (and the automaton stays const / sharable).
-    const float completion = boost * (1.0f + BIAS_COMPLETION_BONUS_FACTOR);
+    // Arc base depends on the arc's SOURCE: continuations (from a live
+    // partial match) get full `boost`; fresh word starts (from the root)
+    // get the down-weighted base (see BIAS_WORD_START_FACTOR); an arc
+    // that completes a word gets the completion bonus on its base.
+    const float word_start_base = boost * BIAS_WORD_START_FACTOR;
     a.rows_.assign(a.nodes_.size(), std::vector<float>(static_cast<size_t>(width), 0.0f));
     for (size_t s = 0; s < a.nodes_.size(); ++s) {
         std::vector<float> & row = a.rows_[s];
-        auto                 add = [&](const Node & n) {
+        auto                 add = [&](const Node & n, float base) {
             for (const auto & kv : n.children) {
                 const int tid = kv.first;
                 if (tid < 0 || tid >= width - 1) {  // exclude blank at width-1 and OOR ids
                     continue;
                 }
-                const float value = a.nodes_[static_cast<size_t>(kv.second)].terminal ? completion : boost;
+                const float value = a.nodes_[static_cast<size_t>(kv.second)].terminal ?
+                                        base * (1.0f + BIAS_COMPLETION_BONUS_FACTOR) :
+                                        base;
                 row[static_cast<size_t>(tid)] = std::max(row[static_cast<size_t>(tid)], value);
             }
         };
-        add(a.nodes_[s]);
+        add(a.nodes_[s], s == 0 ? word_start_base : boost);
         if (s != 0) {
-            add(a.nodes_[0]);  // fresh word starts stay live mid-match
+            add(a.nodes_[0], word_start_base);  // fresh word starts stay live mid-match
         }
     }
 
