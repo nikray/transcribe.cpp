@@ -12,6 +12,7 @@
 #include "arch/parakeet/bias_automaton.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -153,6 +154,31 @@ void test_advance_fallback_can_start_new_word() {
     CHECK(a.depth(s) == 1);  // fell back and re-entered via root's child
 }
 
+void test_generic_start_ids_flag_bare_marker_pieces() {
+    // "erd" spells as ▁ + er + d — a bare-marker first piece is a generic
+    // start; "Linkerd" begins with the specific "▁link"/"▁Link" pieces.
+    const auto res = bias_segment_vocabulary({ "erd", "Linkerd" }, k_vocab);
+    CHECK(res.failed.empty());
+    CHECK(res.generic_start_ids == (std::unordered_set<int>{ 0 }));
+}
+
+void test_generic_start_arcs_get_no_standing_boost() {
+    // A generic word-start arc contributes no standing boost anywhere; the
+    // match can still begin through it (advance works), and its onward
+    // continuations keep full boost. Mirrors the reference suite.
+    const auto res = bias_segment_vocabulary({ "erd", "ChargeBee" }, k_vocab);
+    CHECK(res.failed.empty());
+    const float         boost = 2.0f;
+    const BiasAutomaton a =
+        BiasAutomaton::build(res.seqs, static_cast<int>(k_vocab.size()) + 1, boost, res.generic_start_ids);
+    const float * at_root = a.row(a.root());
+    CHECK(feq(at_root[0], 0.0f));                              // generic "▁" arc unboosted
+    CHECK(feq(at_root[1], boost * BIAS_WORD_START_FACTOR));    // "▁Char" stays boosted
+    const int s = a.advance(a.root(), 0);                      // enter via the generic arc
+    CHECK(a.depth(s) == 1);
+    CHECK(feq(a.row(s)[7], boost));                            // "er" continuation, full boost
+}
+
 void test_rows_boost_continuation_wordstarts_and_completion() {
     const float         boost = 2.0f;
     const BiasAutomaton a     = make_automaton(boost);
@@ -236,6 +262,8 @@ int main() {
     test_advance_follows_goto_arcs_to_terminal();
     test_advance_dead_partial_falls_back();
     test_advance_fallback_can_start_new_word();
+    test_generic_start_ids_flag_bare_marker_pieces();
+    test_generic_start_arcs_get_no_standing_boost();
     test_rows_boost_continuation_wordstarts_and_completion();
     test_word_start_arcs_weigh_less_than_continuations();
     test_row_dense_and_never_boosts_blank();

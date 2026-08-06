@@ -719,7 +719,7 @@ static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel *
     // Row width = token classes incl. blank, uniform across head kinds
     // (TDT/RNNT: pred_vocab; CTC: n_classes; blank always at width-1).
     const int     width = pm->host_decoder.blank_id + 1;
-    BiasAutomaton a     = BiasAutomaton::build(segd.seqs, width, boost);
+    BiasAutomaton a     = BiasAutomaton::build(segd.seqs, width, boost, segd.generic_start_ids);
     if (a.empty()) {
         return std::nullopt;
     }
