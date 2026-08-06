@@ -49,6 +49,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace transcribe::parakeet {
@@ -119,6 +120,15 @@ std::vector<int> bias_segment_word(const std::string & word, const BiasPieceInde
 struct BiasSegmentation {
     std::vector<std::vector<int>> seqs;
     std::vector<std::string>      failed;
+    // Token ids whose piece is a GENERIC word start — the bare "\xE2\x96\x81"
+    // marker or marker + a single character — collected from the pieces
+    // that appear as the FIRST token of some sequence. Such arcs are too
+    // unspecific to be a useful entry signal (a standing boost on "\xE2\x96\x81C"
+    // steals real speech: "say" -> "C" + natural continuation -> "C."),
+    // so BiasAutomaton::build gives their root arcs no standing boost.
+    // A match can still begin through them — the automaton advances on
+    // whatever the decoder emits — and continuations keep full boost.
+    std::unordered_set<int> generic_start_ids;
 };
 
 BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
@@ -146,7 +156,10 @@ class BiasAutomaton {
     // count INCLUDING blank at width-1 (== pred_vocab for TDT/RNNT,
     // n_classes for CTC). boost <= 0 or width <= 0 or empty seqs yield
     // an empty() automaton that callers should not consult.
-    static BiasAutomaton build(const std::vector<std::vector<int>> & seqs, int width, float boost);
+    static BiasAutomaton build(const std::vector<std::vector<int>> & seqs,
+                               int                                   width,
+                               float                                 boost,
+                               const std::unordered_set<int> &       generic_start_ids = {});
 
     bool empty() const { return nodes_.size() <= 1 || width_ <= 0; }
 

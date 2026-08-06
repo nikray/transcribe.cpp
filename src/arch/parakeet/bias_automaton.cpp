@@ -107,6 +107,15 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
         for (const std::string & variant : bias_word_variants(word)) {
             std::vector<int> ids = bias_segment_word(variant, idx);
             if (!ids.empty()) {
+                // A first piece that is just the word-start marker (or
+                // marker + one char) is a GENERIC start — flag it so the
+                // automaton gives its root arc no standing boost (see
+                // BiasSegmentation::generic_start_ids).
+                const int          first = ids.front();
+                const std::string & fp   = pieces[static_cast<size_t>(first)];
+                if (fp.size() <= sizeof(k_word_start)) {  // marker (3 bytes) + <=1 byte
+                    out.generic_start_ids.insert(first);
+                }
                 if (seen.insert(ids).second) {
                     out.seqs.push_back(std::move(ids));
                 }
@@ -124,7 +133,10 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
 // Automaton
 // ---------------------------------------------------------------------------
 
-BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs, int width, float boost) {
+BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
+                                   int                                   width,
+                                   float                                 boost,
+                                   const std::unordered_set<int> &       generic_start_ids) {
     BiasAutomaton a;
     a.width_ = width;
     a.boost_ = boost;
@@ -207,6 +219,23 @@ BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs, i
         add(a.nodes_[s], s == 0 ? word_start_base : boost);
         if (s != 0) {
             add(a.nodes_[0], word_start_base);  // fresh word starts stay live mid-match
+        }
+        // Generic word-start arcs (bare marker / marker+1 char pieces) get
+        // NO standing boost: they are too unspecific to be a useful entry
+        // signal and are exactly the arcs that steal real speech. Zero the
+        // row slots for root arcs whose token is generic — unless the same
+        // token is also a live continuation from this state, which keeps
+        // its (larger) continuation value via the max() above only when
+        // s's own children contain it.
+        for (const int tid : generic_start_ids) {
+            if (tid < 0 || tid >= width - 1) {
+                continue;
+            }
+            const bool is_root_arc = a.nodes_[0].children.count(tid) != 0;
+            const bool is_own_arc  = s != 0 && a.nodes_[s].children.count(tid) != 0;
+            if (is_root_arc && !is_own_arc) {
+                row[static_cast<size_t>(tid)] = 0.0f;
+            }
         }
     }
 
