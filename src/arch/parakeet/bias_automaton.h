@@ -24,10 +24,13 @@
 //     greedy, so cancellation degenerates to correct state fallback).
 //   * At each decode step, an additive bias is applied to the token
 //     logits BEFORE argmax: continuations of the current partial match
-//     and word-start tokens get `boost` logit units; an arc that
-//     completes a word gets an extra completion bonus. Blank and (for
-//     TDT) the duration-head logits are never touched, and reported
-//     token confidences stay derived from the UNBIASED logits.
+//     get `boost` logit units, fresh word-start tokens get
+//     `boost * BIAS_WORD_START_FACTOR` (down-weighted — the standing
+//     word-start mass scales with vocabulary size; see the constant),
+//     and an arc that completes a word gets an extra completion bonus
+//     on its base. Blank and (for TDT) the duration-head logits are
+//     never touched, and reported token confidences stay derived from
+//     the UNBIASED logits.
 //
 // This module is pure host C++ (no ggml, no tokenizer dependency) so it
 // is unit-testable in isolation; the decode loops in decoder.cpp take a
@@ -56,10 +59,23 @@ namespace transcribe::parakeet {
 // neighbors; 10.0 visibly over-boosts (merged/hallucinated words).
 inline constexpr float BIAS_DEFAULT_BOOST = 3.0f;
 
-// Bonus factor added on top of `boost` for an arc that completes a
-// whole word — rewards committing the final piece of "ChargeBee" over a
-// lexically similar non-word continuation.
+// Bonus factor added on top of an arc's base boost for an arc that
+// completes a whole word — rewards committing the final piece of
+// "ChargeBee" over a lexically similar non-word continuation.
 inline constexpr float BIAS_COMPLETION_BONUS_FACTOR = 0.5f;
+
+// Weight applied to fresh word-START arcs (arcs leaving the automaton
+// root), relative to continuation arcs (arcs leaving a live partial
+// match). Word starts are pure prior — every vocab word contributes one
+// standing boosted arc at every decode step — so their total mass
+// scales linearly with the vocabulary and, at full weight, starts
+// winning the argmax on flat logits (silence/noise) once the list
+// reaches a few dozen words: a 50-word list at boost 3.0 was measured
+// hallucinating boosted words on 9/37 silence-ish corpus clips.
+// Continuations carry acoustic evidence (the match already began) and
+// keep full boost — near-miss flips like "Quelium"→"Quellium" are
+// decided at continuation tokens and are unaffected.
+inline constexpr float BIAS_WORD_START_FACTOR = 0.5f;
 
 // ---------------------------------------------------------------------------
 // Segmentation (pure)
@@ -115,10 +131,12 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
 // States are dense indices; 0 is the root. The per-state additive bias
 // row over the token classes is precomputed at build time (const after
 // build, thread-safe to share). Row semantics: continuations of the
-// live partial match and fresh word starts both get `boost`; an arc
-// that completes a word gets the completion bonus on top; when a token
-// continues the match AND starts a new word the larger value wins.
-// Blank (index width-1) and out-of-range ids are never boosted.
+// live partial match get `boost`; fresh word starts (arcs leaving the
+// root) get `boost * BIAS_WORD_START_FACTOR`; an arc that completes a
+// word gets the completion bonus on top of its base; when a token
+// continues the match AND starts a new word the larger (continuation)
+// value wins. Blank (index width-1) and out-of-range ids are never
+// boosted.
 class BiasAutomaton {
   public:
     BiasAutomaton() = default;

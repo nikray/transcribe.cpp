@@ -956,20 +956,33 @@ int argmax_range(const float * data, int n) {
     return best_i;
 }
 
-// Argmax over data[i] + bias_row[i], computed on the fly so the caller's
-// logits stay unbiased (the confidence path re-reads them). Same
-// first-occurrence tie rule as argmax_range.
-int argmax_range_biased(const float * data, int n, const float * bias_row) {
-    int   best_i = 0;
-    float best_v = data[0] + bias_row[0];
+// Argmax over data[i] + bias_row[i], guarded so bias can never flip a
+// step whose UNBIASED winner is blank: on silence/noise frames the
+// logits are nearly flat and blank wins by a small margin, which even a
+// down-weighted standing word-start boost can close once the vocabulary
+// has a few dozen entries — the "hallucinated boosted words on silence"
+// failure mode. Genuine near-miss flips happen on steps whose unbiased
+// winner is a (wrong) non-blank token and are unaffected. Both argmaxes
+// are computed in one pass; the caller's logits stay unbiased (the
+// confidence path re-reads them). Same first-occurrence tie rule as
+// argmax_range.
+int argmax_range_biased(const float * data, int n, const float * bias_row, int blank_id) {
+    int   best_biased_i   = 0;
+    float best_biased_v   = data[0] + bias_row[0];
+    int   best_unbiased_i = 0;
+    float best_unbiased_v = data[0];
     for (int i = 1; i < n; ++i) {
         const float v = data[i] + bias_row[i];
-        if (v > best_v) {
-            best_v = v;
-            best_i = i;
+        if (v > best_biased_v) {
+            best_biased_v = v;
+            best_biased_i = i;
+        }
+        if (data[i] > best_unbiased_v) {
+            best_unbiased_v = data[i];
+            best_unbiased_i = i;
         }
     }
-    return best_i;
+    return best_unbiased_i == blank_id ? blank_id : best_biased_i;
 }
 
 // True when `bias` is usable for a decode over `n_token_classes` logit
@@ -1156,7 +1169,7 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights & w,
         const float * token_logits    = logits.data();
         const float * duration_logits = logits.data() + n_token_cls;
 
-        const int pred_token = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state)) :
+        const int pred_token = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
                                           argmax_range(token_logits, n_token_cls);
         const int decision   = argmax_range(duration_logits, n_dur);
         const int duration   = w.tdt_durations[static_cast<size_t>(decision)];
@@ -1367,7 +1380,7 @@ transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
         // extras). Bias shifts only the argmax; confidence below reads
         // the unbiased logits.
         const float * token_logits = logits.data();
-        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state)) :
+        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
                                                 argmax_range(token_logits, n_token_cls);
 
         if (iter == 1 && transcribe::debug::enabled()) {
@@ -1553,7 +1566,7 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
         joint_step(w.joint, jg, enc_proj, decoder_out, logits);
 
         const float * token_logits = logits.data();
-        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state)) :
+        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
                                                 argmax_range(token_logits, n_token_cls);
 
         const bool is_blank = (pred_token == blank_id);
@@ -1711,7 +1724,7 @@ transcribe_status decode_ctc_greedy(const HostDecoderWeights & w,
     int prev_label = -1;
     for (int t = 0; t < T_enc; ++t) {
         const float * row   = logits_all.data() + static_cast<size_t>(t) * static_cast<size_t>(n_classes);
-        const int     label = use_bias ? argmax_range_biased(row, n_classes, bias->row(bias_state)) :
+        const int     label = use_bias ? argmax_range_biased(row, n_classes, bias->row(bias_state), blank_id) :
                                          argmax_range(row, n_classes);
         if (label == prev_label) {
             continue;  // run-length collapse
