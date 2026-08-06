@@ -36,6 +36,7 @@ using transcribe::parakeet::bias_segment_word;
 using transcribe::parakeet::bias_word_variants;
 using transcribe::parakeet::build_bias_piece_index;
 using transcribe::parakeet::BIAS_COMPLETION_BONUS_FACTOR;
+using transcribe::parakeet::BIAS_WORD_START_FACTOR;
 
 // A miniature cased SentencePiece-style vocabulary. "▁" marks word starts.
 const std::vector<std::string> k_vocab = {
@@ -157,19 +158,34 @@ void test_rows_boost_continuation_wordstarts_and_completion() {
     const BiasAutomaton a     = make_automaton(boost);
     const int           width = a.width();
 
-    // At root: word starts only (ids 1, 4, 6, 9), all at `boost`.
+    // At root: word starts only (ids 1, 4, 6, 9), at the down-weighted
+    // word-start base.
     const float * at_root = a.row(a.root());
     for (int t = 0; t < width; ++t) {
         const bool is_start = (t == 1 || t == 4 || t == 6 || t == 9);
-        CHECK(feq(at_root[t], is_start ? boost : 0.0f));
+        CHECK(feq(at_root[t], is_start ? boost * BIAS_WORD_START_FACTOR : 0.0f));
     }
 
-    // Two deep (▁Char ge ·): completing arc gets the bonus; word starts
-    // still present.
+    // Two deep (▁Char ge ·): completing CONTINUATION arc gets the bonus
+    // on the full base; fresh word starts stay at the down-weighted base.
     const int     two_deep = a.advance(a.advance(a.root(), 1), 2);
     const float * row      = a.row(two_deep);
     CHECK(feq(row[3], boost * (1.0f + BIAS_COMPLETION_BONUS_FACTOR)));
-    CHECK(feq(row[1], boost));
+    CHECK(feq(row[1], boost * BIAS_WORD_START_FACTOR));
+}
+
+void test_word_start_arcs_weigh_less_than_continuations() {
+    // The standing word-start mass scales with vocabulary size, so fresh
+    // starts are down-weighted; a live match's continuations keep full
+    // boost, and a token that is both takes the larger (continuation)
+    // value. Mirrors the reference suite's weighting test.
+    const float         boost    = 2.0f;
+    const BiasAutomaton a        = make_automaton(boost);
+    const int           one_deep = a.advance(a.root(), 1);  // ▁Char ·
+    const float *       row      = a.row(one_deep);
+    CHECK(feq(row[2], boost));                            // "ge" continues the match
+    CHECK(feq(row[4], boost * BIAS_WORD_START_FACTOR));   // "▁char" would start anew
+    CHECK(row[2] > row[4]);
 }
 
 void test_row_dense_and_never_boosts_blank() {
@@ -178,7 +194,7 @@ void test_row_dense_and_never_boosts_blank() {
     CHECK(width == static_cast<int>(k_vocab.size()) + 1);
     const float * row = a.row(a.root());
     CHECK(feq(row[width - 1], 0.0f));  // blank
-    CHECK(feq(row[1], 2.0f));
+    CHECK(feq(row[1], 2.0f * BIAS_WORD_START_FACTOR));
     CHECK(feq(row[0], 0.0f));
     // Precomputed: same pointer on a second call.
     CHECK(a.row(a.root()) == row);
@@ -221,6 +237,7 @@ int main() {
     test_advance_dead_partial_falls_back();
     test_advance_fallback_can_start_new_word();
     test_rows_boost_continuation_wordstarts_and_completion();
+    test_word_start_arcs_weigh_less_than_continuations();
     test_row_dense_and_never_boosts_blank();
     test_state_isolated_per_decode_call();
     test_empty_automaton_is_safe();
