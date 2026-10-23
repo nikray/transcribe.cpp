@@ -828,6 +828,114 @@ void test_stream_family_token_prefix_maps_trimmed_leading_space() {
     CHECK(std::strcmp(text.tentative_text, "") == 0);
 }
 
+// Reproduce a sentence-boundary space token followed by a word-start
+// space. Recognition must keep advancing before finalize, without publishing
+// tokens beyond the family's committed frontier.
+void test_stream_parakeet_normalized_spaces_keep_committing() {
+    reset_sequence_globals();
+    transcribe_model model;
+    init_streaming_model(model);
+    model.arch = &sequence_arch_named_parakeet();
+    transcribe_session session;
+    session.model = &model;
+
+    g_feed_texts[0]             = "better.";
+    g_feed_texts[1]             = "better. Basically";
+    g_feed_texts[2]             = "better. Basically next";
+    g_feed_texts[3]             = "better. Basically next";
+    g_n_feed_texts              = 4;
+    g_token_texts[0]            = " better.";
+    g_n_token_rows              = 1;
+    g_forced_n_committed_tokens = 1;
+    CHECK(transcribe_stream_begin(&session, nullptr, nullptr) == TRANSCRIBE_OK);
+
+    float                    pcm = 0.0f;
+    transcribe_stream_update upd;
+    transcribe_stream_update_init(&upd);
+    CHECK(transcribe_stream_feed(&session, &pcm, 1, &upd) == TRANSCRIBE_OK);
+    transcribe_stream_text text;
+    transcribe_stream_text_init(&text);
+    CHECK(transcribe_stream_get_text(&session, &text) == TRANSCRIBE_OK);
+    CHECK(std::strcmp(text.committed_text, "better.") == 0);
+
+    g_token_texts[1]            = " ";
+    g_token_texts[2]            = " Basically";
+    g_n_token_rows              = 3;
+    g_forced_n_committed_tokens = 3;
+    CHECK(transcribe_stream_feed(&session, &pcm, 1, &upd) == TRANSCRIBE_OK);
+    CHECK(upd.committed_changed);
+    CHECK(transcribe_stream_get_text(&session, &text) == TRANSCRIBE_OK);
+    CHECK(std::strcmp(text.committed_text, "better. Basically") == 0);
+    CHECK(std::strcmp(text.tentative_text, "") == 0);
+
+    g_token_texts[3] = "  ";
+    g_token_texts[4] = " next ";
+    g_n_token_rows   = 5;
+    // A visible but uncommitted next word must remain tentative.
+    CHECK(transcribe_stream_feed(&session, &pcm, 1, &upd) == TRANSCRIBE_OK);
+    CHECK(!upd.committed_changed);
+    CHECK(transcribe_stream_get_text(&session, &text) == TRANSCRIBE_OK);
+    CHECK(std::strcmp(text.committed_text, "better. Basically") == 0);
+    CHECK(std::strcmp(text.tentative_text, " next") == 0);
+
+    g_forced_n_committed_tokens = 5;
+    CHECK(transcribe_stream_feed(&session, &pcm, 1, &upd) == TRANSCRIBE_OK);
+    CHECK(upd.committed_changed);
+    CHECK(transcribe_stream_get_text(&session, &text) == TRANSCRIBE_OK);
+    CHECK(std::strcmp(text.committed_text, "better. Basically next") == 0);
+    CHECK(std::strcmp(text.tentative_text, "") == 0);
+    reset_sequence_globals();
+}
+
+void test_stream_parakeet_space_projection_preserves_other_bytes() {
+    reset_sequence_globals();
+    transcribe_model model;
+    init_streaming_model(model);
+    model.arch = &sequence_arch_named_parakeet();
+    transcribe_session session;
+    session.model               = &model;
+    g_feed_texts[0]             = "caf\xc3\xa9\t next";
+    g_n_feed_texts              = 1;
+    g_token_texts[0]            = "  caf\xc3\xa9\t  next ";
+    g_n_token_rows              = 1;
+    g_forced_n_committed_tokens = 1;
+    CHECK(transcribe_stream_begin(&session, nullptr, nullptr) == TRANSCRIBE_OK);
+    float                    pcm = 0.0f;
+    transcribe_stream_update upd;
+    transcribe_stream_update_init(&upd);
+    CHECK(transcribe_stream_feed(&session, &pcm, 1, &upd) == TRANSCRIBE_OK);
+    transcribe_stream_text text;
+    transcribe_stream_text_init(&text);
+    CHECK(transcribe_stream_get_text(&session, &text) == TRANSCRIBE_OK);
+    CHECK(std::strcmp(text.committed_text, "caf\xc3\xa9\t next") == 0);
+    CHECK(std::strcmp(text.tentative_text, "") == 0);
+    reset_sequence_globals();
+}
+
+void test_stream_other_family_keeps_repeated_spaces() {
+    reset_sequence_globals();
+    transcribe_model model;
+    init_streaming_model(model);
+    model.arch = &sequence_arch_named_moonshine_streaming();
+    transcribe_session session;
+    session.model               = &model;
+    g_feed_texts[0]             = "two  spaces";
+    g_n_feed_texts              = 1;
+    g_token_texts[0]            = "two  spaces";
+    g_n_token_rows              = 1;
+    g_forced_n_committed_tokens = 1;
+    CHECK(transcribe_stream_begin(&session, nullptr, nullptr) == TRANSCRIBE_OK);
+    float                    pcm = 0.0f;
+    transcribe_stream_update upd;
+    transcribe_stream_update_init(&upd);
+    CHECK(transcribe_stream_feed(&session, &pcm, 1, &upd) == TRANSCRIBE_OK);
+    transcribe_stream_text text;
+    transcribe_stream_text_init(&text);
+    CHECK(transcribe_stream_get_text(&session, &text) == TRANSCRIBE_OK);
+    CHECK(std::strcmp(text.committed_text, "two  spaces") == 0);
+    reset_sequence_globals();
+}
+
 void test_stream_text_stable_prefix_does_not_rewrite_committed() {
     transcribe_model model;
     init_streaming_model(model);
@@ -1572,6 +1680,9 @@ int main() {
     test_stream_auto_unknown_family_falls_back_to_generic_stable_prefix();
     test_stream_stable_prefix_known_family_uses_family_boundary();
     test_stream_family_token_prefix_maps_trimmed_leading_space();
+    test_stream_parakeet_normalized_spaces_keep_committing();
+    test_stream_parakeet_space_projection_preserves_other_bytes();
+    test_stream_other_family_keeps_repeated_spaces();
     test_stream_text_stable_prefix_does_not_rewrite_committed();
     test_stream_text_clamps_raw_tentative_offset_after_shrink();
     test_stream_committed_row_hints_can_exceed_current_rows();
