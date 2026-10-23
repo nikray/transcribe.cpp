@@ -642,23 +642,23 @@ impl Stream<'_> {
         unsafe { sys::transcribe_stream_revision(self.session.ptr) }
     }
 
-    /// How many leading segments of the current [`snapshot`](Self::snapshot)
-    /// are committed (append-only; will not be rewritten by later feeds).
+    /// Raw segment-row boundary hint for the current [`snapshot`](Self::snapshot).
+    /// Rows may change independently of committed display text; use
+    /// [`text`](Self::text) for the stable committed-text contract.
     pub fn n_committed_segments(&self) -> i32 {
         unsafe { sys::transcribe_stream_n_committed_segments(self.session.ptr) }
     }
 
-    /// How many leading words of the current [`snapshot`](Self::snapshot)
-    /// are committed. Together with the snapshot's per-word `t0_ms` /
-    /// `t1_ms` this yields word-precise capture-clock time ranges for
-    /// newly committed text (diff against the count observed at the
-    /// previous revision).
+    /// Raw word-row boundary hint for the current [`snapshot`](Self::snapshot).
+    /// Useful when inspecting word timestamps. Counts and rows do not provide
+    /// the stable committed-text guarantee of [`text`](Self::text).
     pub fn n_committed_words(&self) -> i32 {
         unsafe { sys::transcribe_stream_n_committed_words(self.session.ptr) }
     }
 
-    /// How many leading tokens of the current [`snapshot`](Self::snapshot)
-    /// are committed.
+    /// Raw token-row boundary hint for the current [`snapshot`](Self::snapshot).
+    /// Useful when inspecting token timestamps. Raw rows may be revised;
+    /// [`text`](Self::text) owns the stable committed-text contract.
     pub fn n_committed_tokens(&self) -> i32 {
         unsafe { sys::transcribe_stream_n_committed_tokens(self.session.ptr) }
     }
