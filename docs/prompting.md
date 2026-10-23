@@ -12,6 +12,7 @@ Probe `transcribe_model_supports()` for the matching feature bit.
 
 | Family | Vocabulary | Context prompt | Instruct | Prefix |
 |---|---|---|---|---|
+| Parakeet | yes | | | |
 | Whisper | yes | yes | | yes |
 | Qwen3-ASR | yes | yes | | |
 | Voxtral (2507) | | | yes | |
@@ -35,3 +36,8 @@ note under [`models/`](models/).
 - A feature bit covers plain transcription. Under another task or output mode
   a model may ignore `vocabulary` or `prompt` with a WARN; its model doc says
   when.
+
+Parakeet applies vocabulary terms through decoder-level biasing in offline and
+streaming recognition. The default boost is 3.0; optional Parakeet extensions
+(or CLI `--bias-boost`) override the strength. An empty list or zero boost
+leaves decoding unchanged. Terms that cannot be spelled are skipped with a warning.

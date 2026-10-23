@@ -45,8 +45,8 @@ fn parakeet_bias_run_extension() {
         .map(str::to_string)
         .collect();
     let opts = RunOptions {
+        vocabulary: words,
         family: Some(RunExtension::ParakeetBias(ParakeetBiasOptions {
-            words,
             boost: None, // library default (3.0)
         })),
         ..Default::default()

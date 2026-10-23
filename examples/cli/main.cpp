@@ -77,9 +77,6 @@ void print_usage(const char * argv0) {
                  "  --temperature F       (whisper) tier-0 sampling temperature (default 0 = greedy)\n"
                  "  --condition-on-prev-tokens (whisper) carry prev-chunk tokens across chunks\n"
                  "  --prompt-condition T  (whisper) prompt placement: first|all (default: first)\n"
-                 "  --bias-words W1,W2    (parakeet) custom-vocabulary boosting: boost the\n"
-                 "                        token sequences spelling these comma-separated\n"
-                 "                        words during greedy decode (offline and streaming)\n"
                  "  --bias-boost F        (parakeet) additive logit boost per matched token\n"
                  "                        (default 3.0)\n"
                  "  --itn                 (sensevoice/funasr-nano) enable inverse text\n"
@@ -421,24 +418,6 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
                 return false;
             }
             out.whisper_set = true;
-        } else if (a == "--bias-words") {
-            const char * v = take_value(a.c_str());
-            if (!v) {
-                return false;
-            }
-            // Comma-separated word/phrase list; empty items dropped.
-            std::string       item;
-            const std::string vs = v;
-            for (size_t i = 0; i <= vs.size(); ++i) {
-                if (i == vs.size() || vs[i] == ',') {
-                    if (!item.empty()) {
-                        out.bias_words.push_back(item);
-                    }
-                    item.clear();
-                } else {
-                    item.push_back(vs[i]);
-                }
-            }
         } else if (a == "--bias-boost") {
             const char * v = take_value(a.c_str());
             if (!v) {

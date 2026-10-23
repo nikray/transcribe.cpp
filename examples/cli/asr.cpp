@@ -353,19 +353,11 @@ int run_asr_batch(const cli_args & args, std::ofstream * output) {
         }
     }
 
-    // Parakeet run-slot vocab biasing (offline decode); see the
-    // single-file path for the streaming-ext counterpart. Allocated
-    // outside the per-file loop like wx so the bytes stay live.
+    // Vocabulary travels in rp; this extension only overrides boost.
     struct transcribe_parakeet_bias_run_ext bias_rx;
     transcribe_parakeet_bias_run_ext_init(&bias_rx);
-    std::vector<const char *> bias_ptrs;
-    for (const auto & w : args.bias_words) {
-        bias_ptrs.push_back(w.c_str());
-    }
-    if (!bias_ptrs.empty() &&
+    if (args.bias_boost_set &&
         transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN)) {
-        bias_rx.words   = bias_ptrs.data();
-        bias_rx.n_words = bias_ptrs.size();
         if (args.bias_boost_set) {
             bias_rx.boost = args.bias_boost;
         }
@@ -559,15 +551,11 @@ int run_asr_batch(const cli_args & args, std::ofstream * output) {
                 transcribe_parakeet_buffered_stream_ext_init(&pkt_buf_sp);
                 struct transcribe_voxtral_realtime_stream_ext vx_sp;
                 transcribe_voxtral_realtime_stream_ext_init(&vx_sp);
-                const bool want_bias        = !bias_ptrs.empty();
+                const bool want_bias        = args.bias_boost_set;
                 const bool want_cache_aware = (args.stream_att_right >= 0);
                 const bool want_buffered =
                     args.stream_buf_left_ms >= 0 || args.stream_buf_chunk_ms >= 0 || args.stream_buf_right_ms >= 0;
                 if (want_bias) {
-                    pkt_sp.bias_words       = bias_ptrs.data();
-                    pkt_sp.n_bias_words     = bias_ptrs.size();
-                    pkt_buf_sp.bias_words   = bias_ptrs.data();
-                    pkt_buf_sp.n_bias_words = bias_ptrs.size();
                     if (args.bias_boost_set) {
                         pkt_sp.bias_boost     = args.bias_boost;
                         pkt_buf_sp.bias_boost = args.bias_boost;
@@ -794,19 +782,11 @@ int run_asr_file(const cli_args &           args,
         }
     }
 
-    // Parakeet run-slot vocab biasing (offline decode); see the
-    // single-file path for the streaming-ext counterpart. Allocated
-    // outside the per-file loop like wx so the bytes stay live.
+    // Vocabulary travels in rp; this extension only overrides boost.
     struct transcribe_parakeet_bias_run_ext bias_rx;
     transcribe_parakeet_bias_run_ext_init(&bias_rx);
-    std::vector<const char *> bias_ptrs;
-    for (const auto & w : args.bias_words) {
-        bias_ptrs.push_back(w.c_str());
-    }
-    if (!bias_ptrs.empty() &&
+    if (args.bias_boost_set &&
         transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN)) {
-        bias_rx.words   = bias_ptrs.data();
-        bias_rx.n_words = bias_ptrs.size();
         if (args.bias_boost_set) {
             bias_rx.boost = args.bias_boost;
         }
@@ -852,17 +832,13 @@ int run_asr_file(const cli_args &           args,
         transcribe_parakeet_buffered_stream_ext_init(&pkt_buf_sp);
         struct transcribe_voxtral_realtime_stream_ext vx_sp;
         transcribe_voxtral_realtime_stream_ext_init(&vx_sp);
-        const bool want_bias        = !bias_ptrs.empty();
+        const bool want_bias        = args.bias_boost_set;
         const bool want_cache_aware = (args.stream_att_right >= 0);
         const bool want_buffered =
             args.stream_buf_left_ms >= 0 || args.stream_buf_chunk_ms >= 0 || args.stream_buf_right_ms >= 0;
         if (want_bias) {
-            // Same word list on both parakeet stream ext shapes;
-            // whichever ext ends up attached carries it.
-            pkt_sp.bias_words       = bias_ptrs.data();
-            pkt_sp.n_bias_words     = bias_ptrs.size();
-            pkt_buf_sp.bias_words   = bias_ptrs.data();
-            pkt_buf_sp.n_bias_words = bias_ptrs.size();
+            // Override boost on the selected stream extension.
+
             if (args.bias_boost_set) {
                 pkt_sp.bias_boost     = args.bias_boost;
                 pkt_buf_sp.bias_boost = args.bias_boost;
