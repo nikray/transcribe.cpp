@@ -184,7 +184,14 @@ void test_invalid_vocabulary(bool streaming) {
     const char * missing[] = { nullptr };
     rp.vocabulary          = missing;
     reject();
-    std::vector<const char *> too_many(257, "hello");
+    std::vector<std::string> storage;
+    for (int i = 0; i < 257; ++i) {
+        storage.push_back("term" + std::to_string(i));
+    }
+    std::vector<const char *> too_many;
+    for (const auto & term : storage) {
+        too_many.push_back(term.c_str());
+    }
     rp.vocabulary   = too_many.data();
     rp.n_vocabulary = static_cast<int32_t>(too_many.size());
     reject();
@@ -223,6 +230,92 @@ void test_invalid_vocabulary(bool streaming) {
     }
 }
 
+void test_canonical_term_limits(const char * fixture) {
+    Fixture f;
+    if (!f.load(fixture)) {
+        return;
+    }
+    transcribe_run_params rp;
+    transcribe_run_params_init(&rp);
+    std::vector<std::string> storage;
+    // Unspellable terms still count toward the unique input limit.
+    for (int i = 0; i < 255; ++i) {
+        storage.push_back("term" + std::to_string(i));
+    }
+    storage.insert(storage.end(), { "hello", " hello ", "", " \t\r\n\f\v", "hello" });
+    std::vector<const char *> terms;
+    for (const auto & term : storage) {
+        terms.push_back(term.c_str());
+    }
+    rp.vocabulary   = terms.data();
+    rp.n_vocabulary = static_cast<int32_t>(terms.size());
+    CHECK(f.begin(rp) == TRANSCRIBE_OK);
+    CHECK(f.state()->stream_bias.has_value());
+    std::vector<const char *> duplicates(300, "hello");
+    rp.vocabulary   = duplicates.data();
+    rp.n_vocabulary = static_cast<int32_t>(duplicates.size());
+    CHECK(f.begin(rp) == TRANSCRIBE_OK);
+}
+
+void test_rejection_preserves_result(const char * fixture, bool streaming) {
+    Fixture f;
+    if (!f.load(fixture)) {
+        return;
+    }
+    auto *                state       = f.state();
+    auto *                model       = static_cast<transcribe::parakeet::ParakeetModel *>(f.model);
+    const int             saved_blank = model->host_decoder.blank_id;
+    transcribe_run_params rp;
+    transcribe_run_params_init(&rp);
+    const char * terms[] = { "hello" };
+    rp.vocabulary        = terms;
+    rp.n_vocabulary      = 1;
+    transcribe_stream_params sp;
+    transcribe_stream_params_init(&sp);
+    const float   pcm[]     = { 0.0f };
+    const float * audio[]   = { pcm };
+    const int     lengths[] = { 1 };
+    auto          reject    = [&]() {
+        for (int mode = 0; mode < (streaming ? 3 : 2); ++mode) {
+            state->full_text          = "previous transcript";
+            state->has_result         = true;
+            state->stream_state       = TRANSCRIBE_STREAM_FINISHED;
+            state->stream_revision    = 42;
+            state->n_committed_tokens = 3;
+            state->batch_results      = { state->capture_result() };
+            const auto status         = mode == 0 ? transcribe_run(f.session, pcm, 1, &rp) :
+                                        mode == 1 ? transcribe_run_batch(f.session, audio, lengths, 1, &rp) :
+                                                    transcribe_stream_begin(f.session, &rp, &sp);
+            CHECK(status == TRANSCRIBE_ERR_INVALID_ARG);
+            CHECK(state->full_text == "previous transcript");
+            CHECK(state->has_result);
+            CHECK(state->stream_state == TRANSCRIBE_STREAM_FINISHED);
+            CHECK(state->stream_revision == 42);
+            CHECK(state->n_committed_tokens == 3);
+            CHECK(state->batch_results.size() == 1);
+            if (!state->batch_results.empty()) {
+                CHECK(state->batch_results[0].full_text == "previous transcript");
+            }
+        }
+    };
+    // A tiny model with a synthetic wide head tests the real 64 MiB gate
+    // without allocating the rejected rows or needing a production GGUF.
+    model->host_decoder.blank_id = 16 * 1024 * 1024 - 1;
+    reject();
+    model->host_decoder.blank_id = saved_blank;
+    const std::string too_long(257, 'a');
+    terms[0] = too_long.c_str();
+    reject();
+    terms[0] = "hello";
+    if (!streaming) {
+        transcribe_parakeet_bias_run_ext ext;
+        transcribe_parakeet_bias_run_ext_init(&ext);
+        ext.boost = std::numeric_limits<float>::quiet_NaN();
+        rp.family = &ext.ext;
+        reject();
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -232,6 +325,11 @@ int main() {
     test_boost_and_old_layout(true);
     test_invalid_vocabulary(false);
     test_invalid_vocabulary(true);
+    test_canonical_term_limits("tokenizer_minimal_streaming_cache_aware.gguf");
+    test_canonical_term_limits("tokenizer_minimal_streaming_buffered.gguf");
+    test_rejection_preserves_result("tokenizer_minimal.gguf", false);
+    test_rejection_preserves_result("tokenizer_minimal_streaming_cache_aware.gguf", true);
+    test_rejection_preserves_result("tokenizer_minimal_streaming_buffered.gguf", true);
     std::printf("parakeet_vocabulary_unit: %d failures\n", failures);
     return failures == 0 ? 0 : 1;
 }

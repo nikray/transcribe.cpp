@@ -42,10 +42,13 @@ streaming recognition. The default boost is 3.0; optional Parakeet extensions
 (or CLI `--bias-boost`) override the strength. An empty list or zero boost
 leaves decoding unchanged. Terms that cannot be spelled are skipped with a warning.
 
-Parakeet vocabulary limits: at most 256 input terms, at most 256 UTF-8 bytes per
+Parakeet vocabulary limits: at most 256 unique nonempty terms, at most 256 UTF-8 bytes per
 term, and at most 64 MiB of compiled dense bias rows. Invalid UTF-8, exceeded
 limits, and boost values outside the finite range [0, 10] return INVALID_ARG.
-Duplicates are deduplicated after segmentation; empty terms are ignored.
+ASCII whitespace is trimmed/collapsed before counting and compiling terms.
+Duplicates and empty terms do not consume the term budget. The byte limit applies
+to each original input term. Vocabulary/boost and dense-row budget rejections
+preserve the previous result for batch, single-run, and streaming calls.
 Input count, term length, UTF-8 and boost are validated even when boost is zero.
 The dense-row budget applies only when compiling an active vocabulary.
 

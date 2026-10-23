@@ -317,6 +317,24 @@ void test_memory_budget_and_boost_validation() {
         rejected = true;
     }
     CHECK(rejected);
+    BiasAutomaton::validate_size(
+        {
+            { 1, 2 },
+            { 1, 2 }
+    },
+        4, 48);
+    rejected = false;
+    try {
+        BiasAutomaton::validate_size(
+            {
+                { 1, 2 }
+        },
+            4, 47);
+    } catch (const std::length_error &) {
+        rejected = true;
+    }
+    CHECK(rejected);
+    CHECK(transcribe::parakeet::bias_normalize_term(" \tNew\f\v York\r\n") == "New York");
     for (float boost :
          { -1.0f, 10.1f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN() }) {
         rejected = false;

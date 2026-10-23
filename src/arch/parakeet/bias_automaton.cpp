@@ -25,23 +25,35 @@ std::string ascii_lower(const std::string & s) {
     return out;
 }
 
-std::string strip_ws(const std::string & s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) {
-        return std::string();
-    }
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
+bool ascii_space(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
 }
 
 }  // namespace
+
+std::string bias_normalize_term(const std::string & term) {
+    std::string out;
+    bool        space = false;
+    for (unsigned char c : term) {
+        if (ascii_space(c)) {
+            space = !out.empty();
+        } else {
+            if (space) {
+                out += ' ';
+            }
+            out += static_cast<char>(c);
+            space = false;
+        }
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // Segmentation
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> bias_word_variants(const std::string & word_in) {
-    const std::string word = strip_ws(word_in);
+    const std::string word = bias_normalize_term(word_in);
     if (word.empty()) {
         return {};
     }
@@ -79,7 +91,7 @@ std::vector<int> bias_segment_word(const std::string & word, const BiasPieceInde
     std::string target;
     bool        boundary = true;
     for (unsigned char ch : word) {
-        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+        if (ascii_space(ch)) {
             boundary = true;
             continue;
         }
@@ -152,7 +164,7 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
                 any_variant = true;
             }
         }
-        if (!any_variant && !strip_ws(word).empty()) {
+        if (!any_variant && !bias_normalize_term(word).empty()) {
             out.failed.push_back(word);
         }
     }
@@ -162,6 +174,48 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
 // ---------------------------------------------------------------------------
 // Automaton
 // ---------------------------------------------------------------------------
+
+std::vector<BiasAutomaton::Node> BiasAutomaton::build_trie(const std::vector<std::vector<int>> & seqs,
+                                                           int                                   width,
+                                                           size_t                                max_dense_bytes) {
+    std::vector<Node> nodes(1);
+    if (width <= 0) {
+        return nodes;
+    }
+    const size_t max_nodes = max_dense_bytes / (static_cast<size_t>(width) * sizeof(float));
+    if (max_nodes == 0) {
+        throw std::length_error("Parakeet vocabulary exceeds dense-row memory budget");
+    }
+    // Trie.
+    for (const std::vector<int> & seq : seqs) {
+        if (seq.empty()) {
+            continue;
+        }
+        int node = 0;
+        for (int tid : seq) {
+            auto it = nodes[static_cast<size_t>(node)].children.find(tid);
+            if (it == nodes[static_cast<size_t>(node)].children.end()) {
+                if (nodes.size() >= max_nodes) {
+                    throw std::length_error("Parakeet vocabulary exceeds dense-row memory budget");
+                }
+                const int child = static_cast<int>(nodes.size());
+                nodes.emplace_back();
+                nodes.back().depth                             = nodes[static_cast<size_t>(node)].depth + 1;
+                nodes[static_cast<size_t>(node)].children[tid] = child;
+                node                                           = child;
+            } else {
+                node = it->second;
+            }
+        }
+        nodes[static_cast<size_t>(node)].terminal = true;
+    }
+
+    return nodes;
+}
+
+void BiasAutomaton::validate_size(const std::vector<std::vector<int>> & seqs, int width, size_t max_dense_bytes) {
+    (void) build_trie(seqs, width, max_dense_bytes);
+}
 
 BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
                                    int                                   width,
@@ -180,33 +234,7 @@ BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
         return a;
     }
 
-    const size_t max_nodes = max_dense_bytes / (static_cast<size_t>(width) * sizeof(float));
-    if (max_nodes == 0) {
-        throw std::length_error("Parakeet vocabulary exceeds dense-row memory budget");
-    }
-    // Trie.
-    for (const std::vector<int> & seq : seqs) {
-        if (seq.empty()) {
-            continue;
-        }
-        int node = 0;
-        for (int tid : seq) {
-            auto it = a.nodes_[static_cast<size_t>(node)].children.find(tid);
-            if (it == a.nodes_[static_cast<size_t>(node)].children.end()) {
-                if (a.nodes_.size() >= max_nodes) {
-                    throw std::length_error("Parakeet vocabulary exceeds dense-row memory budget");
-                }
-                const int child = static_cast<int>(a.nodes_.size());
-                a.nodes_.emplace_back();
-                a.nodes_.back().depth                             = a.nodes_[static_cast<size_t>(node)].depth + 1;
-                a.nodes_[static_cast<size_t>(node)].children[tid] = child;
-                node                                              = child;
-            } else {
-                node = it->second;
-            }
-        }
-        a.nodes_[static_cast<size_t>(node)].terminal = true;
-    }
+    a.nodes_ = build_trie(seqs, width, max_dense_bytes);
 
     // BFS failure links (classic Aho-Corasick). Root's children fail to
     // root; deeper children walk the parent's failure chain.

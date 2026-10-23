@@ -834,11 +834,11 @@ static transcribe_status validate_bias_input(const transcribe_run_params * param
     if (params == nullptr) {
         return TRANSCRIBE_OK;
     }
-    if (params->n_vocabulary < 0 || static_cast<size_t>(params->n_vocabulary) > BIAS_MAX_TERMS ||
-        (params->n_vocabulary > 0 && params->vocabulary == nullptr)) {
+    if (params->n_vocabulary < 0 || (params->n_vocabulary > 0 && params->vocabulary == nullptr)) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet vocabulary: maximum 256 terms");
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
+    std::unordered_set<std::string> unique;
     for (int32_t i = 0; i < params->n_vocabulary; ++i) {
         const char * term = params->vocabulary[i];
         if (term == nullptr) {
@@ -850,6 +850,14 @@ static transcribe_status validate_bias_input(const transcribe_run_params * param
         }
         if (length > BIAS_MAX_TERM_BYTES || !bias_valid_utf8(term, length)) {
             log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet vocabulary: terms must be valid UTF-8, at most 256 bytes");
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        const auto normalized = bias_normalize_term(std::string(term, length));
+        if (!normalized.empty()) {
+            unique.insert(normalized);
+        }
+        if (unique.size() > BIAS_MAX_TERMS) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet vocabulary: maximum 256 unique nonempty terms");
             return TRANSCRIBE_ERR_INVALID_ARG;
         }
     }
@@ -864,15 +872,19 @@ static transcribe_status validate_bias_input(const transcribe_run_params * param
 static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel * pm,
                                                            const char * const *  words,
                                                            uint64_t              n_words,
-                                                           float                 boost) {
+                                                           float                 boost,
+                                                           bool                  validate_only = false) {
     if (words == nullptr || n_words == 0 || boost == 0.0f) {
         return std::nullopt;
     }
-    std::vector<std::string> word_list;
-    word_list.reserve(static_cast<size_t>(n_words));
+    std::vector<std::string>        word_list;
+    std::unordered_set<std::string> unique;
     for (uint64_t i = 0; i < n_words; ++i) {
-        if (words[i] != nullptr && words[i][0] != '\0') {
-            word_list.emplace_back(words[i]);
+        if (words[i] != nullptr) {
+            auto term = bias_normalize_term(words[i]);
+            if (!term.empty() && unique.insert(term).second) {
+                word_list.push_back(std::move(term));
+            }
         }
     }
     if (word_list.empty()) {
@@ -889,7 +901,7 @@ static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel *
     }
 
     BiasSegmentation segd = bias_segment_vocabulary(word_list, pieces);
-    if (!segd.failed.empty()) {
+    if (!validate_only && !segd.failed.empty()) {
         std::string skipped;
         for (size_t i = 0; i < segd.failed.size() && i < 10; ++i) {
             if (i != 0) {
@@ -908,8 +920,12 @@ static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel *
 
     // Row width = token classes incl. blank, uniform across head kinds
     // (TDT/RNNT: pred_vocab; CTC: n_classes; blank always at width-1).
-    const int     width = pm->host_decoder.blank_id + 1;
-    BiasAutomaton a     = BiasAutomaton::build(segd.seqs, width, boost, segd.generic_start_ids);
+    const int width = pm->host_decoder.blank_id + 1;
+    if (validate_only) {
+        BiasAutomaton::validate_size(segd.seqs, width);
+        return std::nullopt;
+    }
+    BiasAutomaton a = BiasAutomaton::build(segd.seqs, width, boost, segd.generic_start_ids);
     if (a.empty()) {
         return std::nullopt;
     }
@@ -918,6 +934,45 @@ static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel *
             "word(s), boost=%.2f",
             segd.seqs.size(), word_list.size(), static_cast<double>(boost));
     return a;
+}
+
+// Pure pre-clear validation, including the model-dependent dense-row budget.
+// Only a small trie is built here; scoring rows are allocated after acceptance.
+static transcribe_status validate_bias(const ParakeetModel * pm, const transcribe_run_params * params, float boost) {
+    if (const auto st = validate_bias_input(params, boost); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    try {
+        if (params != nullptr) {
+            compile_bias_automaton(pm, params->vocabulary, params->n_vocabulary, boost, true);
+        }
+    } catch (const std::length_error & error) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s", error.what());
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    return TRANSCRIBE_OK;
+}
+
+static transcribe_status run_bias_boost(const transcribe_run_params * params, float & boost) {
+    boost                         = BIAS_DEFAULT_BOOST;
+    const transcribe_ext * family = params != nullptr ? params->family : nullptr;
+    if (family != nullptr) {
+        if (const auto st = transcribe_ext_check(family, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN,
+                                                 sizeof(transcribe_parakeet_bias_run_ext));
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        boost = reinterpret_cast<const transcribe_parakeet_bias_run_ext *>(family)->boost;
+    }
+    return TRANSCRIBE_OK;
+}
+
+static transcribe_status run_validate(const transcribe_session * session, const transcribe_run_params * params) {
+    float boost;
+    if (const auto st = run_bias_boost(params, boost); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    return validate_bias(static_cast<const ParakeetModel *>(session->model), params, boost);
 }
 
 // Parse the run-slot bias extension (PKBR) off `params` and refresh
@@ -929,15 +984,9 @@ static transcribe_status refresh_run_bias(ParakeetSession *             pc,
                                           const ParakeetModel *         pm,
                                           const transcribe_run_params * params) {
     pc->run_bias.reset();
-    float                  boost  = BIAS_DEFAULT_BOOST;
-    const transcribe_ext * family = params != nullptr ? params->family : nullptr;
-    if (family != nullptr) {
-        if (const transcribe_status st = transcribe_ext_check(family, TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN,
-                                                              sizeof(transcribe_parakeet_bias_run_ext));
-            st != TRANSCRIBE_OK) {
-            return st;
-        }
-        boost = reinterpret_cast<const transcribe_parakeet_bias_run_ext *>(family)->boost;
+    float boost;
+    if (const auto st = run_bias_boost(params, boost); st != TRANSCRIBE_OK) {
+        return st;
     }
     if (const auto st = validate_bias_input(params, boost); st != TRANSCRIBE_OK) {
         return st;
@@ -3591,8 +3640,7 @@ transcribe_status stream_validate(const transcribe_session *       session,
             return st;
         }
     }
-    return validate_bias_input(run_params,
-                               stream_bias_boost(stream_params != nullptr ? stream_params->family : nullptr));
+    return validate_bias(pm, run_params, stream_bias_boost(stream_params != nullptr ? stream_params->family : nullptr));
 }
 
 transcribe_status stream_begin(transcribe_session *             session,
@@ -4153,6 +4201,7 @@ extern const Arch arch = {
     /* .stream_finalize  = */ stream_finalize,
     /* .stream_reset     = */ stream_reset,
     /* .accepts_ext_kind = */ accepts_ext_kind,
+    /* .run_validate     = */ run_validate,
 };
 
 }  // namespace transcribe::parakeet

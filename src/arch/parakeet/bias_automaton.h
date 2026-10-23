@@ -133,6 +133,9 @@ struct BiasSegmentation {
     std::unordered_set<int>       generic_start_ids;
 };
 
+// Trim and collapse ASCII whitespace; shared by validation and compilation.
+std::string bias_normalize_term(const std::string & term);
+
 BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
                                          const std::vector<std::string> & pieces);
 
@@ -165,6 +168,11 @@ class BiasAutomaton {
                                const std::unordered_set<int> &       generic_start_ids = {},
                                size_t                                max_dense_bytes   = BIAS_MAX_DENSE_BYTES);
 
+    // Validate the exact trie size without allocating dense scoring rows.
+    static void validate_size(const std::vector<std::vector<int>> & seqs,
+                              int                                   width,
+                              size_t                                max_dense_bytes = BIAS_MAX_DENSE_BYTES);
+
     bool empty() const { return nodes_.size() <= 1 || width_ <= 0; }
 
     int width() const { return width_; }
@@ -196,6 +204,8 @@ class BiasAutomaton {
         int                          depth    = 0;
         bool                         terminal = false;
     };
+
+    static std::vector<Node> build_trie(const std::vector<std::vector<int>> & seqs, int width, size_t max_dense_bytes);
 
     std::vector<Node>               nodes_;
     std::vector<std::vector<float>> rows_;  // one dense row per node

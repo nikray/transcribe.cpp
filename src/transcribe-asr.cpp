@@ -1347,7 +1347,8 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
                                        const float *                        pcm,
                                        int                                  n_samples,
                                        const struct transcribe_run_params * params,
-                                       bool *                               committed = nullptr) {
+                                       bool *                               committed   = nullptr,
+                                       bool                                 clear_batch = false) {
     // Parameter-shape validation runs first and does not touch session
     // state. A caller that passes NULL pointers or a non-positive sample
     // count gets ERR_INVALID_ARG back without any visible side effect
@@ -1470,6 +1471,9 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
     if (committed != nullptr) {
         *committed = true;
     }
+    if (clear_batch) {
+        session->batch_results.clear();
+    }
     session->clear_result();
     session->t_mel_us              = 0;
     session->t_encode_us           = 0;
@@ -1494,28 +1498,18 @@ static transcribe_status transcribe_run_impl(struct transcribe_session *        
                                              const float *                        pcm,
                                              int                                  n_samples,
                                              const struct transcribe_run_params * params) {
-    // A well-formed single run has the same result view as a one-item batch:
-    // reset batch_results so the transcribe_batch_* accessors fall back to
-    // reading the scratch slot as utterance 0.
-    //
-    // Guard the deref with the SAME pre-deref conditions run_one_inner uses
-    // (non-null session + non-null pcm + positive n_samples). A malformed
-    // call must not touch the session at all — the API smoke test probes
-    // this with a fake (session *)0x1 and a NULL pcm / non-positive
-    // n_samples, expecting INVALID_ARG with no dereference.
-    // Non-finite PCM is malformed: reject before batch_results is touched.
+    // Replace the previous batch view only after run_one_inner's preflight
+    // succeeds. Invalid vocabulary/options must preserve all result views,
+    // not just the scratch transcript. Shape checks also live there.
     if (pcm != nullptr && n_samples > 0 && !pcm_is_finite(pcm, n_samples)) {
         return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    if (session != nullptr && pcm != nullptr && n_samples > 0) {
-        session->batch_results.clear();
     }
     // run_one_inner arms the guard at its commit point, so a pre-clear
     // rejection never releases and everything after (family error, abort,
     // throw) always does.
     transcribe::ScratchReleaseGuard scratch_release;
     scratch_release.session = session;
-    return run_one_inner(session, pcm, n_samples, params, &scratch_release.armed);
+    return run_one_inner(session, pcm, n_samples, params, &scratch_release.armed, true);
 }
 
 // Batch run (offline)
