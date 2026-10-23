@@ -13,7 +13,7 @@ import ctypes as _c
 # Stable digest of the ABI surface below (structs, enums, macros, layout,
 # prototypes). A native provider package echoes this back so the API
 # package can reject an ABI-mismatched provider before dlopen.
-PUBLIC_HEADER_HASH = "f99ad4169374b8f3"
+PUBLIC_HEADER_HASH = "cd084fd8987aa72c"
 
 # === enum constants ===
 TRANSCRIBE_OK = 0
@@ -145,6 +145,7 @@ TRANSCRIBE_BACKEND_MASK_OTHER = 2147483648
 TRANSCRIBE_BACKEND_MASK_ROCM = 16
 TRANSCRIBE_BACKEND_MASK_VULKAN = 4
 TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM = 1414746957
+TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN = 1380076368
 TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM = 1396853584
 TRANSCRIBE_EXT_KIND_PARAKEET_STREAM = 1414744912
 TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE = 1380206163
@@ -206,6 +207,8 @@ class transcribe_parakeet_stream_ext(_c.Structure):
     pass
 class transcribe_parakeet_buffered_stream_ext(_c.Structure):
     pass
+class transcribe_parakeet_bias_run_ext(_c.Structure):
+    pass
 class transcribe_sortformer_diarize_ext(_c.Structure):
     pass
 class transcribe_vad_info(_c.Structure):
@@ -250,8 +253,9 @@ transcribe_langid_params._fields_ = [("struct_size", _c.c_uint64), ("allowed", _
 transcribe_langid_result._fields_ = [("struct_size", _c.c_uint64), ("n_candidates", _c.c_int32), ("allowed_mass", _c.c_float)]
 transcribe_langid_candidate._fields_ = [("struct_size", _c.c_uint64), ("index", _c.c_int32), ("code", _c.c_char_p), ("name", _c.c_char_p), ("p", _c.c_float), ("logit", _c.c_float)]
 transcribe_moonshine_streaming_stream_ext._fields_ = [("ext", transcribe_ext), ("min_decode_interval_ms", _c.c_int32)]
-transcribe_parakeet_stream_ext._fields_ = [("ext", transcribe_ext), ("att_context_right", _c.c_int32)]
-transcribe_parakeet_buffered_stream_ext._fields_ = [("ext", transcribe_ext), ("left_ms", _c.c_int32), ("chunk_ms", _c.c_int32), ("right_ms", _c.c_int32)]
+transcribe_parakeet_stream_ext._fields_ = [("ext", transcribe_ext), ("att_context_right", _c.c_int32), ("bias_words", _c.POINTER(_c.c_char_p)), ("n_bias_words", _c.c_uint64), ("bias_boost", _c.c_float)]
+transcribe_parakeet_buffered_stream_ext._fields_ = [("ext", transcribe_ext), ("left_ms", _c.c_int32), ("chunk_ms", _c.c_int32), ("right_ms", _c.c_int32), ("bias_words", _c.POINTER(_c.c_char_p)), ("n_bias_words", _c.c_uint64), ("bias_boost", _c.c_float)]
+transcribe_parakeet_bias_run_ext._fields_ = [("ext", transcribe_ext), ("words", _c.POINTER(_c.c_char_p)), ("n_words", _c.c_uint64), ("boost", _c.c_float)]
 transcribe_sortformer_diarize_ext._fields_ = [("ext", transcribe_ext), ("preset", _c.c_int)]
 transcribe_vad_info._fields_ = [("struct_size", _c.c_uint64), ("sample_rate", _c.c_int32), ("frame_samples", _c.c_int32)]
 transcribe_vad_session_params._fields_ = [("struct_size", _c.c_uint64), ("n_threads", _c.c_int32)]
@@ -323,8 +327,9 @@ STRUCT_LAYOUT = {
     'transcribe_langid_result': {'size': 16, 'align': 8, 'offsets': {'struct_size': 0, 'n_candidates': 8, 'allowed_mass': 12}},
     'transcribe_langid_candidate': {'size': 40, 'align': 8, 'offsets': {'struct_size': 0, 'index': 8, 'code': 16, 'name': 24, 'p': 32, 'logit': 36}},
     'transcribe_moonshine_streaming_stream_ext': {'size': 24, 'align': 8, 'offsets': {'ext': 0, 'min_decode_interval_ms': 16}},
-    'transcribe_parakeet_stream_ext': {'size': 24, 'align': 8, 'offsets': {'ext': 0, 'att_context_right': 16}},
-    'transcribe_parakeet_buffered_stream_ext': {'size': 32, 'align': 8, 'offsets': {'ext': 0, 'left_ms': 16, 'chunk_ms': 20, 'right_ms': 24}},
+    'transcribe_parakeet_stream_ext': {'size': 48, 'align': 8, 'offsets': {'ext': 0, 'att_context_right': 16, 'bias_words': 24, 'n_bias_words': 32, 'bias_boost': 40}},
+    'transcribe_parakeet_buffered_stream_ext': {'size': 56, 'align': 8, 'offsets': {'ext': 0, 'left_ms': 16, 'chunk_ms': 20, 'right_ms': 24, 'bias_words': 32, 'n_bias_words': 40, 'bias_boost': 48}},
+    'transcribe_parakeet_bias_run_ext': {'size': 40, 'align': 8, 'offsets': {'ext': 0, 'words': 16, 'n_words': 24, 'boost': 32}},
     'transcribe_sortformer_diarize_ext': {'size': 24, 'align': 8, 'offsets': {'ext': 0, 'preset': 16}},
     'transcribe_vad_info': {'size': 16, 'align': 8, 'offsets': {'struct_size': 0, 'sample_rate': 8, 'frame_samples': 12}},
     'transcribe_vad_session_params': {'size': 16, 'align': 8, 'offsets': {'struct_size': 0, 'n_threads': 8}},
@@ -511,6 +516,8 @@ def configure(lib):
     lib.transcribe_n_words.argtypes = [_c.c_void_p]
     lib.transcribe_open.restype = _c.c_int
     lib.transcribe_open.argtypes = [_c.c_char_p, _c.POINTER(transcribe_model_load_params), _c.POINTER(transcribe_session_params), _c.POINTER(_c.c_void_p)]
+    lib.transcribe_parakeet_bias_run_ext_init.restype = None
+    lib.transcribe_parakeet_bias_run_ext_init.argtypes = [_c.POINTER(transcribe_parakeet_bias_run_ext)]
     lib.transcribe_parakeet_buffered_stream_ext_init.restype = None
     lib.transcribe_parakeet_buffered_stream_ext_init.argtypes = [_c.POINTER(transcribe_parakeet_buffered_stream_ext)]
     lib.transcribe_parakeet_stream_ext_init.restype = None

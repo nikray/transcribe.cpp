@@ -11,7 +11,7 @@
 // Stable digest of the ABI surface (structs, enums, macros, layout,
 // prototypes), computed by the Python oracle and pinned here so a header
 // ABI change turns this binding's drift check red for conscious review.
-export const PUBLIC_HEADER_HASH = "f99ad4169374b8f3";
+export const PUBLIC_HEADER_HASH = "cd084fd8987aa72c";
 
 // === enum constants ===
 export const TRANSCRIBE_OK = 0;
@@ -143,6 +143,7 @@ export const TRANSCRIBE_BACKEND_MASK_OTHER = 2147483648;
 export const TRANSCRIBE_BACKEND_MASK_ROCM = 16;
 export const TRANSCRIBE_BACKEND_MASK_VULKAN = 4;
 export const TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM = 1414746957;
+export const TRANSCRIBE_EXT_KIND_PARAKEET_BIAS_RUN = 1380076368;
 export const TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM = 1396853584;
 export const TRANSCRIBE_EXT_KIND_PARAKEET_STREAM = 1414744912;
 export const TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE = 1380206163;
@@ -176,8 +177,9 @@ export const STRUCT_LAYOUT: Record<string, StructLayout> = {
   'transcribe_langid_result': { size: 16, align: 8, offsets: {'struct_size': 0, 'n_candidates': 8, 'allowed_mass': 12} },
   'transcribe_langid_candidate': { size: 40, align: 8, offsets: {'struct_size': 0, 'index': 8, 'code': 16, 'name': 24, 'p': 32, 'logit': 36} },
   'transcribe_moonshine_streaming_stream_ext': { size: 24, align: 8, offsets: {'ext': 0, 'min_decode_interval_ms': 16} },
-  'transcribe_parakeet_stream_ext': { size: 24, align: 8, offsets: {'ext': 0, 'att_context_right': 16} },
-  'transcribe_parakeet_buffered_stream_ext': { size: 32, align: 8, offsets: {'ext': 0, 'left_ms': 16, 'chunk_ms': 20, 'right_ms': 24} },
+  'transcribe_parakeet_stream_ext': { size: 48, align: 8, offsets: {'ext': 0, 'att_context_right': 16, 'bias_words': 24, 'n_bias_words': 32, 'bias_boost': 40} },
+  'transcribe_parakeet_buffered_stream_ext': { size: 56, align: 8, offsets: {'ext': 0, 'left_ms': 16, 'chunk_ms': 20, 'right_ms': 24, 'bias_words': 32, 'n_bias_words': 40, 'bias_boost': 48} },
+  'transcribe_parakeet_bias_run_ext': { size: 40, align: 8, offsets: {'ext': 0, 'words': 16, 'n_words': 24, 'boost': 32} },
   'transcribe_sortformer_diarize_ext': { size: 24, align: 8, offsets: {'ext': 0, 'preset': 16} },
   'transcribe_vad_info': { size: 16, align: 8, offsets: {'struct_size': 0, 'sample_rate': 8, 'frame_samples': 12} },
   'transcribe_vad_session_params': { size: 16, align: 8, offsets: {'struct_size': 0, 'n_threads': 8} },
@@ -249,8 +251,9 @@ export function defineTypes(koffi: any): Record<string, any> {
   T['transcribe_langid_result'] = koffi.struct({ struct_size: 'uint64_t', n_candidates: 'int32_t', allowed_mass: 'float' });
   T['transcribe_langid_candidate'] = koffi.struct({ struct_size: 'uint64_t', index: 'int32_t', code: 'char *', name: 'char *', p: 'float', logit: 'float' });
   T['transcribe_moonshine_streaming_stream_ext'] = koffi.struct({ ext: T['transcribe_ext'], min_decode_interval_ms: 'int32_t' });
-  T['transcribe_parakeet_stream_ext'] = koffi.struct({ ext: T['transcribe_ext'], att_context_right: 'int32_t' });
-  T['transcribe_parakeet_buffered_stream_ext'] = koffi.struct({ ext: T['transcribe_ext'], left_ms: 'int32_t', chunk_ms: 'int32_t', right_ms: 'int32_t' });
+  T['transcribe_parakeet_stream_ext'] = koffi.struct({ ext: T['transcribe_ext'], att_context_right: 'int32_t', bias_words: 'void *', n_bias_words: 'uint64_t', bias_boost: 'float' });
+  T['transcribe_parakeet_buffered_stream_ext'] = koffi.struct({ ext: T['transcribe_ext'], left_ms: 'int32_t', chunk_ms: 'int32_t', right_ms: 'int32_t', bias_words: 'void *', n_bias_words: 'uint64_t', bias_boost: 'float' });
+  T['transcribe_parakeet_bias_run_ext'] = koffi.struct({ ext: T['transcribe_ext'], words: 'void *', n_words: 'uint64_t', boost: 'float' });
   T['transcribe_sortformer_diarize_ext'] = koffi.struct({ ext: T['transcribe_ext'], preset: 'int' });
   T['transcribe_vad_info'] = koffi.struct({ struct_size: 'uint64_t', sample_rate: 'int32_t', frame_samples: 'int32_t' });
   T['transcribe_vad_session_params'] = koffi.struct({ struct_size: 'uint64_t', n_threads: 'int32_t' });
@@ -351,6 +354,7 @@ export const FUNCTION_SIGNATURES: Record<string, FnSig> = {
   'transcribe_n_tokens': { ret: 'int', args: ['const struct transcribe_session *'] },
   'transcribe_n_words': { ret: 'int', args: ['const struct transcribe_session *'] },
   'transcribe_open': { ret: 'transcribe_status', args: ['const char *', 'const struct transcribe_model_load_params *', 'const struct transcribe_session_params *', 'struct transcribe_session **'] },
+  'transcribe_parakeet_bias_run_ext_init': { ret: 'void', args: ['struct transcribe_parakeet_bias_run_ext *'] },
   'transcribe_parakeet_buffered_stream_ext_init': { ret: 'void', args: ['struct transcribe_parakeet_buffered_stream_ext *'] },
   'transcribe_parakeet_stream_ext_init': { ret: 'void', args: ['struct transcribe_parakeet_stream_ext *'] },
   'transcribe_print_timings': { ret: 'void', args: ['const struct transcribe_session *'] },

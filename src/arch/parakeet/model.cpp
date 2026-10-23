@@ -859,7 +859,8 @@ static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel *
 // previous call's word list never leaks into an ext-less call). The
 // dispatcher has already matched kind acceptance; this validates the
 // struct shape.
-static transcribe_status refresh_run_bias(ParakeetSession * pc, const ParakeetModel * pm,
+static transcribe_status refresh_run_bias(ParakeetSession *             pc,
+                                          const ParakeetModel *         pm,
                                           const transcribe_run_params * params) {
     pc->run_bias.reset();
     const transcribe_ext * family = params != nullptr ? params->family : nullptr;
@@ -4066,7 +4067,7 @@ extern "C" void transcribe_parakeet_stream_ext_init(struct transcribe_parakeet_s
     std::memset(p, 0, sizeof(*p));
     p->ext.size          = sizeof(*p);
     p->ext.kind          = TRANSCRIBE_EXT_KIND_PARAKEET_STREAM;
-    p->att_context_right = -1;  // model default (max accuracy / max latency)
+    p->att_context_right = -1;       // model default (max accuracy / max latency)
     p->bias_words        = nullptr;  // no biasing
     p->n_bias_words      = 0;
     p->bias_boost        = transcribe::parakeet::BIAS_DEFAULT_BOOST;

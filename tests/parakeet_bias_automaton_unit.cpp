@@ -12,10 +12,10 @@
 #include "arch/parakeet/bias_automaton.h"
 
 #include <algorithm>
-#include <unordered_set>
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -30,36 +30,36 @@ int g_failures = 0;
         }                                                                        \
     } while (0)
 
-using transcribe::parakeet::BiasAutomaton;
-using transcribe::parakeet::BiasPieceIndex;
+using transcribe::parakeet::BIAS_COMPLETION_BONUS_FACTOR;
 using transcribe::parakeet::bias_segment_vocabulary;
 using transcribe::parakeet::bias_segment_word;
-using transcribe::parakeet::bias_word_variants;
-using transcribe::parakeet::build_bias_piece_index;
-using transcribe::parakeet::BIAS_COMPLETION_BONUS_FACTOR;
 using transcribe::parakeet::BIAS_WORD_START_FACTOR;
+using transcribe::parakeet::bias_word_variants;
+using transcribe::parakeet::BiasAutomaton;
+using transcribe::parakeet::BiasPieceIndex;
+using transcribe::parakeet::build_bias_piece_index;
 
 // A miniature cased SentencePiece-style vocabulary. "▁" marks word starts.
 const std::vector<std::string> k_vocab = {
-    "\xE2\x96\x81",         // 0  ▁
+    "\xE2\x96\x81",  // 0  ▁
     "\xE2\x96\x81"
-    "Char",                 // 1  ▁Char
-    "ge",                   // 2
-    "Bee",                  // 3
+    "Char",          // 1  ▁Char
+    "ge",            // 2
+    "Bee",           // 3
     "\xE2\x96\x81"
-    "char",                 // 4  ▁char
-    "bee",                  // 5
+    "char",          // 4  ▁char
+    "bee",           // 5
     "\xE2\x96\x81"
-    "link",                 // 6  ▁link
-    "er",                   // 7
-    "d",                    // 8
+    "link",          // 6  ▁link
+    "er",            // 7
+    "d",             // 8
     "\xE2\x96\x81"
-    "Link",                 // 9  ▁Link
-    "a",                    // 10
-    "b",                    // 11
-    "c",                    // 12
+    "Link",          // 9  ▁Link
+    "a",             // 10
+    "b",             // 11
+    "c",             // 12
     "\xE2\x96\x81"
-    "the",                  // 13 ▁the
+    "the",           // 13 ▁the
 };
 
 std::vector<int> seg(const std::string & word) {
@@ -151,7 +151,7 @@ void test_advance_fallback_can_start_new_word() {
     const BiasAutomaton a = make_automaton(2.0f);
     int                 s = a.advance(a.root(), 1);  // partial ▁Char…
     s                     = a.advance(s, 6);         // ▁link — a fresh word start
-    CHECK(a.depth(s) == 1);  // fell back and re-entered via root's child
+    CHECK(a.depth(s) == 1);                          // fell back and re-entered via root's child
 }
 
 void test_generic_start_ids_flag_bare_marker_pieces() {
@@ -172,11 +172,11 @@ void test_generic_start_arcs_get_no_standing_boost() {
     const BiasAutomaton a =
         BiasAutomaton::build(res.seqs, static_cast<int>(k_vocab.size()) + 1, boost, res.generic_start_ids);
     const float * at_root = a.row(a.root());
-    CHECK(feq(at_root[0], 0.0f));                              // generic "▁" arc unboosted
-    CHECK(feq(at_root[1], boost * BIAS_WORD_START_FACTOR));    // "▁Char" stays boosted
-    const int s = a.advance(a.root(), 0);                      // enter via the generic arc
+    CHECK(feq(at_root[0], 0.0f));                            // generic "▁" arc unboosted
+    CHECK(feq(at_root[1], boost * BIAS_WORD_START_FACTOR));  // "▁Char" stays boosted
+    const int s = a.advance(a.root(), 0);                    // enter via the generic arc
     CHECK(a.depth(s) == 1);
-    CHECK(feq(a.row(s)[7], boost));                            // "er" continuation, full boost
+    CHECK(feq(a.row(s)[7], boost));                          // "er" continuation, full boost
 }
 
 void test_rows_boost_continuation_wordstarts_and_completion() {
@@ -209,8 +209,8 @@ void test_word_start_arcs_weigh_less_than_continuations() {
     const BiasAutomaton a        = make_automaton(boost);
     const int           one_deep = a.advance(a.root(), 1);  // ▁Char ·
     const float *       row      = a.row(one_deep);
-    CHECK(feq(row[2], boost));                            // "ge" continues the match
-    CHECK(feq(row[4], boost * BIAS_WORD_START_FACTOR));   // "▁char" would start anew
+    CHECK(feq(row[2], boost));                              // "ge" continues the match
+    CHECK(feq(row[4], boost * BIAS_WORD_START_FACTOR));     // "▁char" would start anew
     CHECK(row[2] > row[4]);
 }
 

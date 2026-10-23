@@ -69,8 +69,8 @@ struct cli_args {
 
     // Parakeet custom-vocabulary biasing. Ignored by non-Parakeet
     // families (the ext is attached only when the model accepts it).
-    std::vector<std::string> bias_words;            // --bias-words a,b,c
-    float                    bias_boost     = 0.0f; // --bias-boost F
+    std::vector<std::string> bias_words;             // --bias-words a,b,c
+    float                    bias_boost     = 0.0f;  // --bias-boost F
     bool                     bias_boost_set = false;
 
     // Speaker diarization toggle (moss / granite-plus). Unset = library

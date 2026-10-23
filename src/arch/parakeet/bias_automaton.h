@@ -128,7 +128,7 @@ struct BiasSegmentation {
     // so BiasAutomaton::build gives their root arcs no standing boost.
     // A match can still begin through them — the automaton advances on
     // whatever the decoder emits — and continuations keep full boost.
-    std::unordered_set<int> generic_start_ids;
+    std::unordered_set<int>       generic_start_ids;
 };
 
 BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,

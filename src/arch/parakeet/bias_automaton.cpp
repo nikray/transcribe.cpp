@@ -111,8 +111,8 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
                 // marker + one char) is a GENERIC start — flag it so the
                 // automaton gives its root arc no standing boost (see
                 // BiasSegmentation::generic_start_ids).
-                const int          first = ids.front();
-                const std::string & fp   = pieces[static_cast<size_t>(first)];
+                const int           first = ids.front();
+                const std::string & fp    = pieces[static_cast<size_t>(first)];
                 if (fp.size() <= sizeof(k_word_start)) {  // marker (3 bytes) + <=1 byte
                     out.generic_start_ids.insert(first);
                 }
@@ -157,9 +157,9 @@ BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
             if (it == a.nodes_[static_cast<size_t>(node)].children.end()) {
                 const int child = static_cast<int>(a.nodes_.size());
                 a.nodes_.emplace_back();
-                a.nodes_.back().depth                                 = a.nodes_[static_cast<size_t>(node)].depth + 1;
-                a.nodes_[static_cast<size_t>(node)].children[tid]     = child;
-                node                                                  = child;
+                a.nodes_.back().depth                             = a.nodes_[static_cast<size_t>(node)].depth + 1;
+                a.nodes_[static_cast<size_t>(node)].children[tid] = child;
+                node                                              = child;
             } else {
                 node = it->second;
             }
@@ -210,9 +210,9 @@ BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
                 if (tid < 0 || tid >= width - 1) {  // exclude blank at width-1 and OOR ids
                     continue;
                 }
-                const float value = a.nodes_[static_cast<size_t>(kv.second)].terminal ?
-                                        base * (1.0f + BIAS_COMPLETION_BONUS_FACTOR) :
-                                        base;
+                const float value             = a.nodes_[static_cast<size_t>(kv.second)].terminal ?
+                                                    base * (1.0f + BIAS_COMPLETION_BONUS_FACTOR) :
+                                                    base;
                 row[static_cast<size_t>(tid)] = std::max(row[static_cast<size_t>(tid)], value);
             }
         };

@@ -869,8 +869,7 @@ int run_asr_file(const cli_args &           args,
             }
         }
         if ((want_cache_aware || want_bias) &&
-            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM,
-                                              TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
+            transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_STREAM, TRANSCRIBE_EXT_KIND_PARAKEET_STREAM)) {
             if (want_cache_aware) {
                 pkt_sp.att_context_right = args.stream_att_right;
                 std::printf("stream: att_context_right=%d\n", args.stream_att_right);

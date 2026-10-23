@@ -63,7 +63,11 @@ pub struct MoonshineStreamingOptions {
 /// skipped with a WARN log; a word containing an interior NUL byte is
 /// dropped at the FFI boundary.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(default))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
 pub struct ParakeetBiasOptions {
     /// Words/phrases to boost. Empty = no biasing.
     pub words: Vec<String>,

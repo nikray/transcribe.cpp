@@ -1188,8 +1188,9 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights & w,
         const float * token_logits    = logits.data();
         const float * duration_logits = logits.data() + n_token_cls;
 
-        const int pred_token = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
-                                          argmax_range(token_logits, n_token_cls);
+        const int pred_token = use_bias ?
+                                   argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
+                                   argmax_range(token_logits, n_token_cls);
         const int decision   = argmax_range(duration_logits, n_dur);
         const int duration   = w.tdt_durations[static_cast<size_t>(decision)];
 
@@ -1410,8 +1411,9 @@ transcribe_status decode_rnnt_greedy(const HostDecoderWeights & w,
         // extras). Bias shifts only the argmax; confidence below reads
         // the unbiased logits.
         const float * token_logits = logits.data();
-        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
-                                                argmax_range(token_logits, n_token_cls);
+        const int     pred_token = use_bias ?
+                                       argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
+                                       argmax_range(token_logits, n_token_cls);
 
         if (iter == 1 && transcribe::debug::enabled()) {
             const long long s_h = H;
@@ -1601,8 +1603,9 @@ transcribe_status decode_rnnt_greedy_streaming(const HostDecoderWeights & w,
         }
 
         const float * token_logits = logits.data();
-        const int     pred_token   = use_bias ? argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
-                                                argmax_range(token_logits, n_token_cls);
+        const int     pred_token = use_bias ?
+                                       argmax_range_biased(token_logits, n_token_cls, bias->row(bias_state), blank_id) :
+                                       argmax_range(token_logits, n_token_cls);
 
         const bool is_blank = (pred_token == blank_id);
         if (is_blank) {
