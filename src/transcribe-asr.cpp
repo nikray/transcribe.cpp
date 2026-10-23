@@ -477,6 +477,25 @@ static size_t token_prefix_raw_bytes(const transcribe_session * session, int n_t
     for (int i = 0; i < capped; ++i) {
         prefix += session->tokens[static_cast<size_t>(i)].text;
     }
+    // Parakeet's public transcript collapses ASCII spaces after stripping
+    // special tags. Map its token prefix through the same projection; token
+    // pieces can contain adjacent spaces even when all tokens are committed.
+    // Other families retain their own whitespace and prefix semantics.
+    const auto * arch = session->model != nullptr ? session->model->arch : nullptr;
+    if (arch != nullptr && arch->name != nullptr && std::strcmp(arch->name, "parakeet") == 0) {
+        size_t write = 0;
+        for (size_t read = 0; read < prefix.size(); ++read) {
+            const char ch = prefix[read];
+            if (ch == ' ' && (write == 0 || prefix[write - 1] == ' ')) {
+                continue;
+            }
+            prefix[write++] = ch;
+        }
+        if (write > 0 && prefix[write - 1] == ' ') {
+            --write;
+        }
+        prefix.resize(write);
+    }
     if (starts_with_bytes(session->full_text, prefix)) {
         return prefix.size();
     }
