@@ -3,8 +3,10 @@
 #include "bias_automaton.h"
 
 #include <algorithm>
+#include <cmath>
 #include <deque>
 #include <set>
+#include <stdexcept>
 
 namespace transcribe::parakeet {
 
@@ -72,26 +74,48 @@ BiasPieceIndex build_bias_piece_index(const std::vector<std::string> & pieces) {
 }
 
 std::vector<int> bias_segment_word(const std::string & word, const BiasPieceIndex & index) {
-    const std::string target = std::string(k_word_start) + word;
-
-    std::vector<int> ids;
-    size_t           pos = 0;
-    while (pos < target.size()) {
-        int          match_id = -1;
+    // SentencePiece uses its word-start marker at every whitespace boundary.
+    // Collapse ASCII whitespace and trim, matching the model's text projection.
+    std::string target;
+    bool        boundary = true;
+    for (unsigned char ch : word) {
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+            boundary = true;
+            continue;
+        }
+        if (boundary) {
+            target += k_word_start;
+            boundary = false;
+        }
+        target += static_cast<char>(ch);
+    }
+    if (target.empty()) {
+        return {};
+    }
+    // Prefer the longest piece that still permits a complete spelling.
+    std::vector<size_t> next(target.size() + 1, 0);
+    std::vector<int>    chosen(target.size(), -1);
+    next[target.size()] = target.size();
+    for (size_t pos = target.size(); pos-- > 0;) {
         const size_t max_take = std::min(index.max_piece_len, target.size() - pos);
-        // Longest piece first.
-        for (size_t take = max_take; take >= 1; --take) {
+        for (size_t take = max_take; take > 0; --take) {
+            if (next[pos + take] == 0) {
+                continue;
+            }
             const auto it = index.piece_to_id.find(target.substr(pos, take));
             if (it != index.piece_to_id.end()) {
-                match_id = it->second;
-                pos += take;
+                next[pos]   = pos + take;
+                chosen[pos] = it->second;
                 break;
             }
         }
-        if (match_id < 0) {
-            return {};
-        }
-        ids.push_back(match_id);
+    }
+    if (next[0] == 0) {
+        return {};
+    }
+    std::vector<int> ids;
+    for (size_t pos = 0; pos < target.size(); pos = next[pos]) {
+        ids.push_back(chosen[pos]);
     }
     return ids;
 }
@@ -111,10 +135,16 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
                 // marker + one char) is a GENERIC start — flag it so the
                 // automaton gives its root arc no standing boost (see
                 // BiasSegmentation::generic_start_ids).
-                const int           first = ids.front();
-                const std::string & fp    = pieces[static_cast<size_t>(first)];
-                if (fp.size() <= sizeof(k_word_start)) {  // marker (3 bytes) + <=1 byte
-                    out.generic_start_ids.insert(first);
+                const int           first        = ids.front();
+                const std::string & fp           = pieces[static_cast<size_t>(first)];
+                const size_t        marker_bytes = sizeof(k_word_start) - 1;
+                if (fp.compare(0, marker_bytes, k_word_start) == 0) {
+                    const size_t suffix_bytes = fp.size() - marker_bytes;
+                    const auto   first_byte   = suffix_bytes > 0 ? static_cast<unsigned char>(fp[marker_bytes]) : 0;
+                    const size_t char_bytes = first_byte < 0x80 ? 1 : first_byte < 0xE0 ? 2 : first_byte < 0xF0 ? 3 : 4;
+                    if (suffix_bytes == 0 || suffix_bytes == char_bytes) {
+                        out.generic_start_ids.insert(first);
+                    }
                 }
                 if (seen.insert(ids).second) {
                     out.seqs.push_back(std::move(ids));
@@ -136,16 +166,24 @@ BiasSegmentation bias_segment_vocabulary(const std::vector<std::string> & words,
 BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
                                    int                                   width,
                                    float                                 boost,
-                                   const std::unordered_set<int> &       generic_start_ids) {
+                                   const std::unordered_set<int> &       generic_start_ids,
+                                   size_t                                max_dense_bytes) {
     BiasAutomaton a;
     a.width_ = width;
     a.boost_ = boost;
     a.nodes_.emplace_back();  // root at index 0
 
-    if (width <= 0) {
+    if (!std::isfinite(boost) || boost < 0.0f || boost > BIAS_MAX_BOOST) {
+        throw std::invalid_argument("Parakeet vocabulary boost must be finite and between 0 and 10");
+    }
+    if (width <= 0 || boost == 0.0f) {
         return a;
     }
 
+    const size_t max_nodes = max_dense_bytes / (static_cast<size_t>(width) * sizeof(float));
+    if (max_nodes == 0) {
+        throw std::length_error("Parakeet vocabulary exceeds dense-row memory budget");
+    }
     // Trie.
     for (const std::vector<int> & seq : seqs) {
         if (seq.empty()) {
@@ -155,6 +193,9 @@ BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
         for (int tid : seq) {
             auto it = a.nodes_[static_cast<size_t>(node)].children.find(tid);
             if (it == a.nodes_[static_cast<size_t>(node)].children.end()) {
+                if (a.nodes_.size() >= max_nodes) {
+                    throw std::length_error("Parakeet vocabulary exceeds dense-row memory budget");
+                }
                 const int child = static_cast<int>(a.nodes_.size());
                 a.nodes_.emplace_back();
                 a.nodes_.back().depth                             = a.nodes_[static_cast<size_t>(node)].depth + 1;
@@ -216,23 +257,27 @@ BiasAutomaton BiasAutomaton::build(const std::vector<std::vector<int>> & seqs,
                 row[static_cast<size_t>(tid)] = std::max(row[static_cast<size_t>(tid)], value);
             }
         };
-        add(a.nodes_[s], s == 0 ? word_start_base : boost);
-        if (s != 0) {
-            add(a.nodes_[0], word_start_base);  // fresh word starts stay live mid-match
+        // Every failure-chain state is a live suffix of the emitted tokens.
+        // Include its continuations as well as the longest current match.
+        for (int state = static_cast<int>(s); state != 0; state = a.nodes_[state].fail) {
+            add(a.nodes_[state], boost);
         }
+        add(a.nodes_[0], word_start_base);
         // Generic word-start arcs (bare marker / marker+1 char pieces) get
         // NO standing boost: they are too unspecific to be a useful entry
         // signal and are exactly the arcs that steal real speech. Zero the
         // row slots for root arcs whose token is generic — unless the same
         // token is also a live continuation from this state, which keeps
-        // its (larger) continuation value via the max() above only when
-        // s's own children contain it.
+        // its (larger) continuation value when any live suffix contains it.
         for (const int tid : generic_start_ids) {
             if (tid < 0 || tid >= width - 1) {
                 continue;
             }
             const bool is_root_arc = a.nodes_[0].children.count(tid) != 0;
-            const bool is_own_arc  = s != 0 && a.nodes_[s].children.count(tid) != 0;
+            bool       is_own_arc  = false;
+            for (int state = static_cast<int>(s); state != 0; state = a.nodes_[state].fail) {
+                is_own_arc = is_own_arc || a.nodes_[state].children.count(tid) != 0;
+            }
             if (is_root_arc && !is_own_arc) {
                 row[static_cast<size_t>(tid)] = 0.0f;
             }

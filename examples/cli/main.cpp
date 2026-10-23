@@ -10,6 +10,7 @@
 
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -423,7 +424,13 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
             if (!v) {
                 return false;
             }
-            out.bias_boost     = static_cast<float>(std::atof(v));
+            char * end     = nullptr;
+            out.bias_boost = std::strtof(v, &end);
+            if (end == v || *end != '\0' || !std::isfinite(out.bias_boost) || out.bias_boost < 0.0f ||
+                out.bias_boost > 10.0f) {
+                std::fprintf(stderr, "error: --bias-boost requires a finite number in [0, 10]\n");
+                return false;
+            }
             out.bias_boost_set = true;
         } else if (a == "--itn") {
             out.use_itn = true;

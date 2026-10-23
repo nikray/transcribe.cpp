@@ -1,0 +1,14 @@
+{
+  "description": "Synthetic acoustically ambiguous proper-name spelling fixture. Quelium is the intended spelling; TTS uses the pronunciation alias Quellium.",
+  "generator": "macOS say -v Samantha; afconvert WAVE LEI16@16000 mono",
+  "synthesis_text": "The Quellium project is ready.",
+  "intended_text": "The Quelium project is ready.",
+  "vocabulary": [
+    "Quelium"
+  ],
+  "wav_sha256": "c56f80cc9a400302bf9d5256e4f80e54186710474b48743ccdc46dd0899f3197",
+  "reference_model": "parakeet-tdt-0.6b-v3-Q4_K_M.gguf",
+  "expected_plain": "The Quellium project is ready.",
+  "expected_biased": "The Quelium project is ready.",
+  "command": "TRANSCRIBE_SMOKE_PARAKEET_MODEL=/path/to/parakeet-tdt-0.6b-v3-Q4_K_M.gguf TRANSCRIBE_BIAS_AUDIO=\"$PWD/samples/parakeet-vocabulary-name.wav\" TRANSCRIBE_BIAS_WORDS=Quelium TRANSCRIBE_BIAS_EXPECT_WORD=Quelium cargo test -p transcribe-cpp --test parakeet_bias parakeet_bias_run_extension -- --nocapture"
+}

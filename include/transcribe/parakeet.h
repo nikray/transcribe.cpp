@@ -40,6 +40,9 @@ extern "C" {
  * Vocabulary terms are supplied through transcribe_run_params::vocabulary
  * for both offline and streaming recognition. Probe TRANSCRIBE_FEATURE_VOCABULARY.
  * Extensions only tune the additive logit boost (default 3.0; 0 disables).
+ * Boost must be finite and in [0, 10]. Vocabulary limits: 256 input terms,
+ * 256 UTF-8 bytes per term, 64 MiB of compiled dense rows. Invalid UTF-8 or
+ * exceeded limits return INVALID_ARG; duplicate spellings are deduplicated.
  * Blank/duration logits and reported confidences are not modified.
  * Unspellable terms are skipped with a warning. Streaming match state persists
  * across feeds and resets at stream_begin.

@@ -46,6 +46,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -448,7 +449,10 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
         return st;
     }
 
-    transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_VOCABULARY, true);
+    // This spelling-path compiler handles SentencePiece-style piece tables.
+    // Do not advertise it for a different tokenizer representation.
+    transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_VOCABULARY,
+                            m->tok.model_type() == "bpe" || m->tok.model_type() == "unigram");
 
     // Architecture KV (encoder / predictor / joint / frontend dims).
     // read_parakeet_hparams enforces cross-field invariants so the shapes
@@ -792,6 +796,66 @@ static double parakeet_ms_per_enc_frame(const ParakeetHParams & hp) {
            static_cast<double>(hp.fe_sample_rate);
 }
 
+// Reject invalid UTF-8 and resource-exhausting vocabulary before compiling.
+static bool bias_valid_utf8(const char * text, size_t size) {
+    for (size_t i = 0; i < size;) {
+        const auto first = static_cast<unsigned char>(text[i++]);
+        if (first < 0x80) {
+            continue;
+        }
+        const int n = first >= 0xC2 && first <= 0xDF ? 1 :
+                      first >= 0xE0 && first <= 0xEF ? 2 :
+                      first >= 0xF0 && first <= 0xF4 ? 3 :
+                                                       -1;
+        if (n < 0 || i + n > size) {
+            return false;
+        }
+        unsigned int cp = first & (0x7F >> (n + 1));
+        for (int j = 0; j < n; ++j) {
+            const auto ch = static_cast<unsigned char>(text[i++]);
+            if ((ch & 0xC0) != 0x80) {
+                return false;
+            }
+            cp = (cp << 6) | (ch & 0x3F);
+        }
+        if ((n == 1 && cp < 0x80) || (n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) ||
+            (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static transcribe_status validate_bias_input(const transcribe_run_params * params, float boost) {
+    if (!std::isfinite(boost) || boost < 0.0f || boost > BIAS_MAX_BOOST) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet vocabulary: boost must be finite and in [0, 10]");
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    if (params == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    if (params->n_vocabulary < 0 || static_cast<size_t>(params->n_vocabulary) > BIAS_MAX_TERMS ||
+        (params->n_vocabulary > 0 && params->vocabulary == nullptr)) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet vocabulary: maximum 256 terms");
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    for (int32_t i = 0; i < params->n_vocabulary; ++i) {
+        const char * term = params->vocabulary[i];
+        if (term == nullptr) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        size_t length = 0;
+        while (length <= BIAS_MAX_TERM_BYTES && term[length] != '\0') {
+            ++length;
+        }
+        if (length > BIAS_MAX_TERM_BYTES || !bias_valid_utf8(term, length)) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet vocabulary: terms must be valid UTF-8, at most 256 bytes");
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+    }
+    return TRANSCRIBE_OK;
+}
+
 // Compile a caller word list into a custom-vocabulary boosting automaton
 // against this model's piece table (see bias_automaton.h). Shared by the
 // run-slot extension (per-call) and the stream extensions' bias fields
@@ -821,7 +885,7 @@ static std::optional<BiasAutomaton> compile_bias_automaton(const ParakeetModel *
     std::vector<std::string>      pieces;
     pieces.reserve(static_cast<size_t>(n_pieces));
     for (int i = 0; i < n_pieces; ++i) {
-        pieces.push_back(tok.token(i));
+        pieces.push_back(tok.is_strippable_special(i) ? std::string() : tok.token(i));
     }
 
     BiasSegmentation segd = bias_segment_vocabulary(word_list, pieces);
@@ -875,30 +939,52 @@ static transcribe_status refresh_run_bias(ParakeetSession *             pc,
         }
         boost = reinterpret_cast<const transcribe_parakeet_bias_run_ext *>(family)->boost;
     }
-    if (params != nullptr) {
-        pc->run_bias = compile_bias_automaton(pm, params->vocabulary, params->n_vocabulary, boost);
+    if (const auto st = validate_bias_input(params, boost); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    try {
+        if (params != nullptr) {
+            pc->run_bias = compile_bias_automaton(pm, params->vocabulary, params->n_vocabulary, boost);
+        }
+    } catch (const std::length_error & error) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s", error.what());
+        return TRANSCRIBE_ERR_INVALID_ARG;
     }
     return TRANSCRIBE_OK;
 }
 
 // Vocabulary uses the generic run params, whose strings the dispatcher owns.
 // Only the optional boost is read from the stream extension.
-static void refresh_stream_bias(ParakeetSession *             pc,
-                                const ParakeetModel *         pm,
-                                const transcribe_run_params * params,
-                                const transcribe_ext *        family) {
-    pc->stream_bias.reset();
-    float boost = BIAS_DEFAULT_BOOST;
+static float stream_bias_boost(const transcribe_ext * family) {
     if (family != nullptr) {
         if (family->kind == TRANSCRIBE_EXT_KIND_PARAKEET_STREAM &&
             family->size >= sizeof(transcribe_parakeet_stream_ext)) {
-            boost = reinterpret_cast<const transcribe_parakeet_stream_ext *>(family)->bias_boost;
-        } else if (family->kind == TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM &&
-                   family->size >= sizeof(transcribe_parakeet_buffered_stream_ext)) {
-            boost = reinterpret_cast<const transcribe_parakeet_buffered_stream_ext *>(family)->bias_boost;
+            return reinterpret_cast<const transcribe_parakeet_stream_ext *>(family)->bias_boost;
+        }
+        if (family->kind == TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM &&
+            family->size >= sizeof(transcribe_parakeet_buffered_stream_ext)) {
+            return reinterpret_cast<const transcribe_parakeet_buffered_stream_ext *>(family)->bias_boost;
         }
     }
-    pc->stream_bias = compile_bias_automaton(pm, params->vocabulary, params->n_vocabulary, boost);
+    return BIAS_DEFAULT_BOOST;
+}
+
+static transcribe_status refresh_stream_bias(ParakeetSession *             pc,
+                                             const ParakeetModel *         pm,
+                                             const transcribe_run_params * params,
+                                             const transcribe_ext *        family) {
+    pc->stream_bias.reset();
+    const float boost = stream_bias_boost(family);
+    if (const auto st = validate_bias_input(params, boost); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    try {
+        pc->stream_bias = compile_bias_automaton(pm, params->vocabulary, params->n_vocabulary, boost);
+    } catch (const std::length_error & error) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s", error.what());
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    return TRANSCRIBE_OK;
 }
 
 // Host-side TDT/RNNT/CTC decode + public result-hierarchy build for one
@@ -3477,8 +3563,8 @@ transcribe_status resolve_cache_aware_stream_geom(const ParakeetModel *         
 // Pre-flight: validate caller extension fields without mutating state.
 // Called by the dispatcher before clear_result, so a rejection leaves the
 // previous snapshot intact. stream_begin re-runs the same resolvers.
-transcribe_status stream_validate(const transcribe_session * session,
-                                  const transcribe_run_params * /*run_params*/,
+transcribe_status stream_validate(const transcribe_session *       session,
+                                  const transcribe_run_params *    run_params,
                                   const transcribe_stream_params * stream_params) {
     const auto * pc = static_cast<const ParakeetSession *>(session);
     const auto * pm = static_cast<const ParakeetModel *>(pc->model);
@@ -3496,11 +3582,17 @@ transcribe_status stream_validate(const transcribe_session * session,
 
     if (is_chunked_with_rc) {
         int L = 0, C = 0, R = 0;
-        return resolve_buffered_stream_geom(pm, stream_params, &L, &C, &R);
+        if (const auto st = resolve_buffered_stream_geom(pm, stream_params, &L, &C, &R); st != TRANSCRIBE_OK) {
+            return st;
+        }
+    } else {
+        int left = 0, right = 0;
+        if (const auto st = resolve_cache_aware_stream_geom(pm, stream_params, &left, &right); st != TRANSCRIBE_OK) {
+            return st;
+        }
     }
-
-    int left = 0, right = 0;
-    return resolve_cache_aware_stream_geom(pm, stream_params, &left, &right);
+    return validate_bias_input(run_params,
+                               stream_bias_boost(stream_params != nullptr ? stream_params->family : nullptr));
 }
 
 transcribe_status stream_begin(transcribe_session *             session,
@@ -3566,7 +3658,11 @@ transcribe_status stream_begin(transcribe_session *             session,
         reset_streaming_decoder_state(pc, pm);
         // frame_offset starts at 0, advanced per-chunk by T_to_decode.
         pc->stream_dec_state.frame_offset = 0;
-        refresh_stream_bias(pc, pm, run_params, stream_params != nullptr ? stream_params->family : nullptr);
+        if (const auto st =
+                refresh_stream_bias(pc, pm, run_params, stream_params != nullptr ? stream_params->family : nullptr);
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
 
         return TRANSCRIBE_OK;
     }
@@ -3604,7 +3700,11 @@ transcribe_status stream_begin(transcribe_session *             session,
     }
     zero_streaming_caches(pc);
     reset_streaming_decoder_state(pc, pm);
-    refresh_stream_bias(pc, pm, run_params, stream_params != nullptr ? stream_params->family : nullptr);
+    if (const auto st =
+            refresh_stream_bias(pc, pm, run_params, stream_params != nullptr ? stream_params->family : nullptr);
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
 
     // Resolve chunking geometry (NeMo's setup_streaming_params):
     //   chunk_size_subsequent = subsampling_factor * (1 + R)

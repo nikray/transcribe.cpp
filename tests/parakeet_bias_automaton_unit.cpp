@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -249,9 +251,102 @@ void test_out_of_range_state_is_treated_as_root() {
     CHECK(a.advance(9999, 1) == a.advance(a.root(), 1));
 }
 
+void test_unicode_single_character_start_is_generic() {
+    const auto segmented = bias_segment_vocabulary({ "\xD0\xB8x" }, { "\xE2\x96\x81\xD0\xB8", "x" });
+    CHECK(segmented.failed.empty());
+    CHECK(segmented.generic_start_ids == (std::unordered_set<int>{ 0 }));
+}
+
+void test_phrase_boundaries_and_utf8() {
+    const std::vector<std::string> pieces = { "\xE2\x96\x81New", "\xE2\x96\x81York", "\xE2\x96\x81Z\xC3\xBCrich" };
+    const auto                     index  = build_bias_piece_index(pieces);
+    CHECK(bias_segment_word("New York", index) == (std::vector<int>{ 0, 1 }));
+    CHECK(bias_segment_word(" \tNew  \nYork \r", index) == (std::vector<int>{ 0, 1 }));
+    CHECK(bias_segment_word("Z\xC3\xBCrich", index) == (std::vector<int>{ 2 }));
+}
+
+void test_longest_piece_must_leave_spellable_suffix() {
+    const auto index =
+        build_bias_piece_index({ "\xE2\x96\x81"
+                                 "ab",
+                                 "\xE2\x96\x81"
+                                 "a",
+                                 "bc" });
+    CHECK(bias_segment_word("abc", index) == (std::vector<int>{ 1, 2 }));
+}
+
+void test_overlapping_suffix_continuations() {
+    const auto automaton = BiasAutomaton::build(
+        {
+            { 1, 2, 3 },
+            { 2, 4 }
+    },
+        6, 2.0f, { 2 });
+    const int state = automaton.advance(automaton.advance(0, 1), 2);
+    CHECK(feq(automaton.row(state)[4], 2.0f * (1.0f + BIAS_COMPLETION_BONUS_FACTOR)));
+    CHECK(automaton.terminal(automaton.advance(state, 4)));
+    // A generic root token is still allowed full continuation boost when it
+    // continues a suffix match, rather than starting a new phrase.
+    const auto generic = BiasAutomaton::build(
+        {
+            { 1, 2, 3 },
+            { 2, 2, 4 }
+    },
+        6, 2.0f, { 2 });
+    const int overlapping = generic.advance(generic.advance(0, 1), 2);
+    CHECK(feq(generic.row(overlapping)[2], 2.0f));
+    CHECK(feq(generic.row(0)[2], 0.0f));
+}
+
+void test_memory_budget_and_boost_validation() {
+    // Three states require exactly 3 * 4 floats. Reject before allocating.
+    CHECK(!BiasAutomaton::build(
+               {
+                   { 1, 2 }
+    },
+               4, 3.0f, {}, 48)
+               .empty());
+    bool rejected = false;
+    try {
+        (void) BiasAutomaton::build(
+            {
+                { 1, 2 }
+        },
+            4, 3.0f, {}, 47);
+    } catch (const std::length_error &) {
+        rejected = true;
+    }
+    CHECK(rejected);
+    for (float boost :
+         { -1.0f, 10.1f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN() }) {
+        rejected = false;
+        try {
+            (void) BiasAutomaton::build(
+                {
+                    { 1, 2 }
+            },
+                4, boost);
+        } catch (const std::invalid_argument &) {
+            rejected = true;
+        }
+        CHECK(rejected);
+    }
+    CHECK(BiasAutomaton::build(
+              {
+                  { 1, 2 }
+    },
+              4, 0.0f)
+              .empty());
+}
+
 }  // namespace
 
 int main() {
+    test_unicode_single_character_start_is_generic();
+    test_phrase_boundaries_and_utf8();
+    test_longest_piece_must_leave_spellable_suffix();
+    test_overlapping_suffix_continuations();
+    test_memory_budget_and_boost_validation();
     test_segment_greedy_longest_match();
     test_segment_lowercase_variant();
     test_segment_falls_back_to_bare_word_start_piece();

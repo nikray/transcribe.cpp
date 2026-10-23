@@ -47,6 +47,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,7 +59,11 @@ namespace transcribe::parakeet {
 // one. Tuned empirically on parakeet-tdt-0.6b: ~1.8 flips nothing; 3.0
 // rescues near-miss invented nouns with no damage to phonetic
 // neighbors; 10.0 visibly over-boosts (merged/hallucinated words).
-inline constexpr float BIAS_DEFAULT_BOOST = 3.0f;
+inline constexpr float  BIAS_DEFAULT_BOOST   = 3.0f;
+inline constexpr float  BIAS_MAX_BOOST       = 10.0f;
+inline constexpr size_t BIAS_MAX_TERMS       = 256;
+inline constexpr size_t BIAS_MAX_TERM_BYTES  = 256;
+inline constexpr size_t BIAS_MAX_DENSE_BYTES = 64 * 1024 * 1024;
 
 // Bonus factor added on top of an arc's base boost for an arc that
 // completes a whole word — rewards committing the final piece of
@@ -99,18 +104,15 @@ struct BiasPieceIndex {
 
 BiasPieceIndex build_bias_piece_index(const std::vector<std::string> & pieces);
 
-// Greedy longest-match segmentation of one word (single variant) into
+// Longest viable piece segmentation of one word/phrase (single variant) into
 // token ids, as it would appear at a word start ("▁" prefix).
 //
-// The runtime has the id→piece table but not the SentencePiece
-// encoder, so segmentation matches piece strings directly. Greedy
-// longest match is not guaranteed to reproduce SentencePiece's Viterbi
-// segmentation, but for boosting purposes any valid spelling of the
-// word is a usable path. Matching runs on bytes; because every piece
-// is a valid UTF-8 substring, byte-longest and codepoint-longest
-// prefixes coincide. Returns an empty vector when some position has no
-// matching piece (word not spellable — e.g. characters outside the
-// model's alphabet).
+// Match the loaded SentencePiece-style pieces, inserting the word-start
+// marker at every ASCII whitespace boundary. A backward reachability pass
+// finds a complete spelling without greedy dead ends. This intentionally
+// does not claim canonical SentencePiece encoding: existing Parakeet GGUFs
+// do not reliably preserve the source tokenizer algorithm/normalizer.
+// Returns empty if no complete spelling exists.
 std::vector<int> bias_segment_word(const std::string & word, const BiasPieceIndex & index);
 
 // Segment all case variants of all words against `pieces` (the model's
@@ -154,12 +156,14 @@ class BiasAutomaton {
     // Compile `seqs` (from bias_segment_vocabulary) into an automaton
     // whose rows are `width` floats wide. `width` is the token-class
     // count INCLUDING blank at width-1 (== pred_vocab for TDT/RNNT,
-    // n_classes for CTC). boost <= 0 or width <= 0 or empty seqs yield
-    // an empty() automaton that callers should not consult.
+    // n_classes for CTC). boost == 0 or width <= 0 or empty seqs yield
+    // an empty() automaton that callers should not consult. Invalid boosts throw
+    // invalid_argument; exceeding the dense-row budget throws length_error.
     static BiasAutomaton build(const std::vector<std::vector<int>> & seqs,
                                int                                   width,
                                float                                 boost,
-                               const std::unordered_set<int> &       generic_start_ids = {});
+                               const std::unordered_set<int> &       generic_start_ids = {},
+                               size_t                                max_dense_bytes   = BIAS_MAX_DENSE_BYTES);
 
     bool empty() const { return nodes_.size() <= 1 || width_ <= 0; }
 
