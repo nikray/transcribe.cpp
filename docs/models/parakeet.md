@@ -172,7 +172,10 @@ training menu (lookahead latency from 160ms at `(70, 1, 1)` through
 2.08s at the default `(70, 13, 13)`). See
 [parakeet-unified-en-0.6b.md](parakeet-unified-en-0.6b.md#streaming)
 for the per-config WER and the `--stream-buf-{left,chunk,right}-ms`
-CLI surface. Other Parakeet variants run offline only.
+CLI surface. The multilingual
+[`nemotron-labs-unified-asr-0.6b`](nemotron-labs-unified-asr-0.6b.md)
+(fork-local port, not published) uses the same buffered path with a
+language prompt. Other Parakeet variants run offline only.
 
 What's not supported (consistent across the family): translation,
 speaker diarization, and VAD as a user-facing feature (`parakeet-ultra` uses

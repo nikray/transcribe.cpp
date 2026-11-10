@@ -1153,10 +1153,21 @@ def cmd_buffered_streaming(args: argparse.Namespace) -> int:
     # The TDT decode driver exposed by NeMo for buffered streaming.
     decoding_computer = model.decoding.decoding.decoding_computer
 
+    # Prompt-conditioned unified variants (nemotron-labs-unified-asr-0.6b):
+    # forward() needs prompt_indices and returns the prompt MLP's output.
+    # Mirrors NeMo's speech_to_text_streaming_infer_rnnt.py, which passes
+    # the same per-utterance index on every chunk.
+    prompt_id: int | None = None
+    if is_prompt_aware(model):
+        prompt_id = resolve_prompt_id(model, args.language)
+        print(f"prompt: target_lang={args.language!r} prompt_id={prompt_id}")
+
     source = make_source(
         args=args, audio_path=audio_path, n_samples=pcm.size, sample_rate=sr, arch=arch
     )
     source["buffered_streaming"] = {
+        "prompt_language": (str(args.language) if prompt_id is not None else None),
+        "prompt_id": prompt_id,
         "att_context_size": [left_frames, chunk_frames, right_frames],
         "left_secs":  float(args.left_secs),
         "chunk_secs": float(args.chunk_secs),
@@ -1191,7 +1202,16 @@ def cmd_buffered_streaming(args: argparse.Namespace) -> int:
                 intermediates[name] = output.detach().clone()
         return fn
 
+    # Pre-prompt encoder output, kept apart from `intermediates` because
+    # it is dumped left-sliced next to enc_out. (B, D, T).
+    unprompted: dict[str, Any] = {}
+
+    def _unprompted_hook(_module, _input, output):
+        unprompted["enc"] = output[0].detach().clone()
+
     block_hooks = []
+    if prompt_id is not None:
+        block_hooks.append(model.encoder.register_forward_hook(_unprompted_hook))
     block_hooks.append(model.preprocessor.register_forward_hook(
         _hook("enc.mel.in", 0)))
     block_hooks.append(model.encoder.pre_encode.register_forward_hook(
@@ -1309,9 +1329,15 @@ def cmd_buffered_streaming(args: argparse.Namespace) -> int:
                 "buffered_streaming.audio_in",
             )
 
+            fwd_kwargs = {}
+            if prompt_id is not None:
+                fwd_kwargs["prompt_indices"] = torch.full(
+                    (buffer.samples.shape[0],), prompt_id, dtype=torch.long,
+                    device=buffer.samples.device)
             encoder_output, encoder_output_len = model(
                 input_signal=buffer.samples,
                 input_signal_length=buffer.context_size_batch.total(),
+                **fwd_kwargs,
             )
             encoder_output = encoder_output.transpose(1, 2)  # (B, T_enc, D)
             encoder_context = buffer.context_size.subsample(
@@ -1330,6 +1356,17 @@ def cmd_buffered_streaming(args: argparse.Namespace) -> int:
                 "buffered_streaming.enc_out",
             )
 
+            # Prompt-conditioned variants: enc_out above is the prompt
+            # MLP's output. Also dump the same slice of the encoder output
+            # BEFORE the prompt MLP, so a comparator can tell an encoder
+            # mismatch from a prompt mismatch.
+            if prompt_id is not None and "enc" in unprompted:
+                dump(
+                    f"stream.chunk.{step_num}.enc_out_unprompted",
+                    unprompted.pop("enc").transpose(1, 2)[0, encoder_context.left:],
+                    "buffered_streaming.enc_out_unprompted",
+                )
+
             # Dump per-chunk per-block intermediates (for cpp-vs-ref
             # encoder fp32 drift bisect).
             for cap_name, cap_tensor in intermediates.items():
@@ -1344,7 +1381,9 @@ def cmd_buffered_streaming(args: argparse.Namespace) -> int:
                     f"buffered_streaming.{cap_name}",
                 )
 
-            chunk_batched_hyps, _, state = decoding_computer(
+            # NeMo <= 6967f48 returns (hyps, alignments, state); newer
+            # releases (3.0.0+) return (hyps, state).
+            decoded = decoding_computer(
                 x=encoder_output_chunk,
                 out_len=torch.where(
                     is_last_chunk_batch,
@@ -1354,6 +1393,7 @@ def cmd_buffered_streaming(args: argparse.Namespace) -> int:
                 prev_batched_state=state,
                 multi_biasing_ids=None,
             )
+            chunk_batched_hyps, state = decoded[0], decoded[-1]
             if current_batched_hyps is None:
                 current_batched_hyps = chunk_batched_hyps
             else:
@@ -1367,9 +1407,17 @@ def cmd_buffered_streaming(args: argparse.Namespace) -> int:
             from nemo.collections.asr.parts.utils.rnnt_utils import (
                 batched_hyps_to_hypotheses,
             )
-            hyps_view = batched_hyps_to_hypotheses(
-                current_batched_hyps, None, batch_size=1
-            )
+            # The alignments positional was dropped after 6967f48; pass by
+            # whichever signature this NeMo has.
+            import inspect as _inspect
+            if "alignments" in _inspect.signature(batched_hyps_to_hypotheses).parameters:
+                hyps_view = batched_hyps_to_hypotheses(
+                    current_batched_hyps, None, batch_size=1
+                )
+            else:
+                hyps_view = batched_hyps_to_hypotheses(
+                    current_batched_hyps, batch_size=1
+                )
             tokens_so_far: list[int] = []
             if hyps_view and getattr(hyps_view[0], "y_sequence", None) is not None:
                 tokens_so_far = [int(x) for x in hyps_view[0].y_sequence.tolist()]

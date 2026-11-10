@@ -1,0 +1,91 @@
+{
+  "_comment": [
+    "nemotron-labs-unified-asr-0.6b per-tensor tolerances for compare_tensors.py (offline path).",
+    "",
+    "Regime: F32 GGUF, CPU backend, --threads 1, C++ mel; reference NeMo 3.0.0",
+    "(EncDecRNNTBPEModelWithPrompt) via scripts/dump_reference_parakeet_nemo.py",
+    "encoder+decode with --offline-only and --language {en,auto,de,es}",
+    "(prompt slots 0, 127, 9, 3) on samples/{jfk,jfk,fleurs-de,fleurs-es}.wav.",
+    "Transcripts matched the reference exactly in all four cases.",
+    "",
+    "Values: 1.5 x the worst observed drift across the four cases (floor 1e-6;",
+    "exact 0.0 kept for pure GGUF reads). Exception: enc.pre_encode.out,",
+    "enc.block.0.out and enc.block.12.out keep the family envelope from",
+    "tests/tolerances/parakeet.json, because on this full-attention path the",
+    "drift is concentrated on the final conv-overhang frame (jfk/en:",
+    "pre_encode max 64.8 on frame 137 of 138, 0.97 elsewhere) and washes out by",
+    "the last block (enc.final max 4.5e-3).",
+    "",
+    "The prompt MLP amplifies encoder drift ~4x (enc.final -> enc.prompted), the",
+    "same pattern as nemotron-3.5-asr-streaming-0.6b.",
+    "",
+    "Buffered streaming is validated separately by",
+    "scripts/validate_buffered_streaming.py (per-chunk, with one-hot inspection).",
+    "",
+    "File must stay FLAT (tensor names at top level; '_comment' ignored)."
+  ],
+  "dec.embed.0": {
+    "max_abs": 0.0,
+    "mean_abs": 0.0
+  },
+  "dec.enc_out": {
+    "max_abs": 0.00668,
+    "mean_abs": 9.89e-05
+  },
+  "dec.enc_out_prompted": {
+    "max_abs": 0.0268,
+    "mean_abs": 0.000607
+  },
+  "dec.joint.0": {
+    "max_abs": 0.0231,
+    "mean_abs": 0.00865
+  },
+  "dec.lstm.0.c.0": {
+    "max_abs": 1e-06,
+    "mean_abs": 1e-06
+  },
+  "dec.lstm.0.h.0": {
+    "max_abs": 1e-06,
+    "mean_abs": 1e-06
+  },
+  "dec.lstm.1.c.0": {
+    "max_abs": 1e-06,
+    "mean_abs": 1e-06
+  },
+  "dec.lstm.1.h.0": {
+    "max_abs": 1e-06,
+    "mean_abs": 1e-06
+  },
+  "enc.block.0.out": {
+    "max_abs": 50.0,
+    "mean_abs": 0.15
+  },
+  "enc.block.12.out": {
+    "max_abs": 40.0,
+    "mean_abs": 0.15
+  },
+  "enc.block.23.out": {
+    "max_abs": 0.00668,
+    "mean_abs": 9.89e-05
+  },
+  "enc.final": {
+    "max_abs": 0.00668,
+    "mean_abs": 9.89e-05
+  },
+  "enc.mel.in": {
+    "max_abs": 0.000394,
+    "mean_abs": 1.75e-06
+  },
+  "enc.pos_emb": {
+    "max_abs": 2.09e-05,
+    "mean_abs": 1e-06
+  },
+  "enc.pre_encode.out": {
+    "max_abs": 2200.0,
+    "mean_abs": 5.0
+  },
+  "enc.prompted": {
+    "max_abs": 0.0268,
+    "mean_abs": 0.000607
+  }
+}

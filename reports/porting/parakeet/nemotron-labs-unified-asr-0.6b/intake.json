@@ -1,0 +1,154 @@
+{
+  "schema_version": "transcribe-intake-v1",
+  "family": "parakeet",
+  "hf_repo": "nvidia/nemotron-labs-unified-asr-0.6b",
+  "hf_revision": "023ce907267a09a308a5cb69239447cb3d0c1597",
+  "sources": {
+    "config": {
+      "kind": "hf_file",
+      "path": "config.json",
+      "status": "missing",
+      "detail": "NeMo .nemo archive only (nemotron-labs-unified-asr-0.6b.nemo, 2,507,735,040 bytes, sha256 1718cc1b44fb8597b2356328d706a8d89f31c389ca6f2256c2e3f743c0246936). Values below were read from model_config.yaml inside the archive."
+    },
+    "preprocessor": {
+      "kind": "hf_file",
+      "path": "preprocessor_config.json",
+      "status": "missing",
+      "detail": "Inside .nemo. Identical to parakeet-unified-en-0.6b: features=128, n_fft=512, window_size=0.025, window_stride=0.01, hann, normalize=per_feature, dither=1e-5, pad_to=0, no preemph key (NeMo default 0.97)."
+    },
+    "tokenizer_config": {
+      "kind": "hf_file",
+      "path": "tokenizer_config.json",
+      "status": "missing",
+      "detail": "SentencePiece BPE inside .nemo: 4095 pieces, blank id 4095, unk id 0, no BOS/EOS, byte_fallback false. One shared vocabulary for 25 languages (Latin, Cyrillic, Greek) with punctuation and case. No <lang-XX> tag pieces."
+    },
+    "tokenizer_json": {
+      "kind": "hf_file",
+      "path": "tokenizer.json",
+      "status": "missing"
+    },
+    "generation_config": {
+      "kind": "hf_file",
+      "path": "generation_config.json",
+      "status": "missing",
+      "detail": "model.cfg.decoding: greedy_batch, max_symbols 10."
+    },
+    "safetensors_metadata": {
+      "kind": "hf_api",
+      "path": "HfApi.get_safetensors_metadata",
+      "status": "missing",
+      "detail": "PyTorch state_dict inside .nemo; 993 tensors."
+    },
+    "model_card": {
+      "kind": "hf_api",
+      "path": "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
+      "status": "found",
+      "detail": "Multilingual (25 European languages) unified offline + buffered-streaming RNN-T with a language prompt input. License OpenMDW-1.1."
+    },
+    "reference_modeling_code": {
+      "kind": "reference_code",
+      "path": "scripts/convert-parakeet.py, src/arch/parakeet/, NeMo rnnt_bpe_models_prompt.py (EncDecRNNTBPEModelWithPrompt), NeMo examples/asr/asr_chunked_inference/rnnt/speech_to_text_streaming_infer_rnnt.py",
+      "status": "found",
+      "detail": "No new layer types. Encoder / predictor / joint tensors have the names and shapes of parakeet-unified-en-0.6b except the three that depend on vocabulary size; the four prompt_kernel.* tensors have the shapes nemotron-3.5-asr-streaming-0.6b already loads."
+    }
+  },
+  "variants": [
+    {
+      "name": "nemotron-labs-unified-asr-0.6b",
+      "memory_gb": 2.5,
+      "files": ["nemotron-labs-unified-asr-0.6b.nemo"]
+    }
+  ],
+  "config": {
+    "architecture_candidates": ["encoder-transducer"],
+    "key_fields": {
+      "architectures": ["EncDecRNNTBPEModelWithPrompt"],
+      "model_type": "parakeet_rnnt_unified_prompt",
+      "encoder.type": "Unified FastConformer (offline + buffered streaming, shared weights)",
+      "encoder.n_layers": 24,
+      "encoder.d_model": 1024,
+      "encoder.n_heads": 8,
+      "encoder.subsampling": "dw_striding",
+      "encoder.subsampling_factor": 8,
+      "encoder.att_context_style": "chunked_limited_with_rc",
+      "encoder.att_chunk_context_size": [[70], [1, 2, 7, 13], [0, 1, 2, 3, 4, 7, 13]],
+      "decoder.type": "RNNTDecoder (pred_hidden 640, 2 LSTM layers)",
+      "joint.type": "RNNTJoint (joint_hidden 640, relu)",
+      "joint.durations": null,
+      "prompt.num_prompts": 128,
+      "prompt.hidden": 2048,
+      "prompt.injection": "after the encoder, per frame: Linear(1024+128 -> 2048), ReLU, Linear(2048 -> 1024); output feeds the joint",
+      "prompt.auto_id": 127,
+      "tokenizer.vocab_size": 4095,
+      "tokenizer.has_punctuation_capitalization": true
+    },
+    "varying_across_variants": []
+  },
+  "dtype": {
+    "expected": "float32",
+    "source": "manual",
+    "evidence": "NeMo .nemo, PyTorch state_dict at float32 by family convention.",
+    "details": {
+      "config_declared": null,
+      "header_distribution": {}
+    },
+    "expected_f32_tensors": []
+  },
+  "frontend": {
+    "sample_rate": 16000,
+    "n_mels": 128,
+    "hop_length": 160,
+    "fft_size": 512,
+    "window": "hann_periodic",
+    "normalization": "per_feature",
+    "preemphasis": 0.97,
+    "dither": 1e-05,
+    "center": true,
+    "padding_mode": "reflect",
+    "mel_filterbank_norm": "slaney"
+  },
+  "tokenizer": {
+    "type": "sentencepiece",
+    "vocab_size": 4095,
+    "special_tokens": {
+      "unk": 0,
+      "blank": 4095
+    },
+    "has_language_tokens": false,
+    "vocab_sha256": null
+  },
+  "capabilities": {
+    "languages": [
+      "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de",
+      "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru",
+      "sk", "sl", "es", "sv", "uk"
+    ],
+    "language_detection": false,
+    "translation": false,
+    "timestamps": ["token", "word"],
+    "streaming": true,
+    "speaker_diarization": false
+  },
+  "upstream_benchmarks": [],
+  "reference_framework": "nemo",
+  "reference_rationale": "NVIDIA NeMo is the first-party framework and the only implementation of EncDecRNNTBPEModelWithPrompt and of the buffered chunked_limited_with_rc inference loop.",
+  "architecture_pattern": "encoder-transducer",
+  "known_risks": [
+    "Before this port, emit_buffered_chunk built the prompt MLP but never uploaded the language one-hot (fixed with the port). On the jfk clip a missing or wrong prompt left the transcript unchanged, so the prompt path needs tensor-level checks (scripts/validate_buffered_streaming.py --language).",
+    "The public API gates language hints on general.languages (the 25 short codes). The prompt dictionary also has locale keys that select different trained slots (es -> 3, es-ES -> 2; pt vs pt-BR); those are not reachable.",
+    "No language tag pieces: with language=NULL the model uses the 'auto' slot (127) and transcribes, but cannot report the language. stt.capability.lang_detect is false.",
+    "The model card's 0.56 s row uses R=5, which is outside the trained menu the runtime enforces; use (70,2,4) or (70,7,7).",
+    "4095-piece multilingual vocabulary: English words split into more pieces than with the 1024-piece English vocabulary, so more decoder steps and longer vocabulary-bias paths.",
+    "Offline is one full-attention pass (no VAD head, so no long-form chunking); memory grows with the square of the audio length."
+  ],
+  "intake_gaps": [
+    {
+      "field": "upstream_benchmarks",
+      "reason": "Model-card numbers not transcribed here; no WER was measured for this port yet."
+    },
+    {
+      "field": "tokenizer.vocab_sha256",
+      "reason": "Not computed."
+    }
+  ]
+}

@@ -288,6 +288,37 @@ VARIANT_PROFILES: dict[str, dict] = {
         "license_name": "nvidia-open-model-license",
         "license_link": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
     },
+    # 0.6B multilingual unified offline+streaming RNNT (25 European
+    # languages). Architecturally parakeet-unified-en-0.6b (same
+    # chunked_limited_with_rc buffered-streaming menu, same encoder /
+    # predictor / joint tensors) with a 4095-piece shared vocabulary and
+    # the nemotron-3.5 prompt MLP on the encoder output (NeMo's
+    # EncDecRNNTBPEModelWithPrompt; 128 slots, 'auto' = 127).
+    #
+    # general.languages advertises the 25 short codes; each is an exact
+    # prompt_dictionary key. The dictionary also carries locale keys that
+    # select DIFFERENT trained slots (es -> 3 but es-ES -> 2, pt vs
+    # pt-BR); they are emitted in the prompt dictionary but are not
+    # reachable through the public API, which gates on general.languages.
+    #
+    # lang_detect is False: the vocabulary has no <lang-XX> tag pieces,
+    # so the model cannot report what it heard. language=NULL still
+    # selects the 'auto' prompt slot and transcribes.
+    "nemotron-labs-unified-asr-0.6b": {
+        "variant": "nemotron-labs-unified-asr-0.6b",
+        "display_name": "Nemotron-Labs Unified ASR 0.6B",
+        "version": "v1",
+        "size_label": "0.6B",
+        "basename": "parakeet-rnnt",
+        "head_kind": "rnnt",
+        "expected_vocab_size": 4095,
+        "languages": V3_LANGUAGES,
+        "lang_detect": False,
+        "has_prompt": True,
+        "license": "other",
+        "license_name": "openmdw-1.1",
+        "license_link": "https://openmdw.ai/license/1-1/",
+    },
     # 0.6B English CTC. No predictor, no joint — encoder feeds a
     # single 1x1 conv (decoder.decoder_layers.0) projecting d_model
     # to vocab+1.
@@ -1994,6 +2025,16 @@ def convert(model_spec: str, out_path: Path, repo_id: str | None = None,
         # dictionary; surface it separately so Stage 4 wiring doesn't
         # have to string-grep the dictionary at runtime.
         auto_id = int(prompt_dict["auto"])
+        # The public API rejects any language hint that is not an exact
+        # general.languages entry, then the C++ resolves the hint by exact
+        # lookup in this dictionary. An advertised language without a
+        # dictionary key would be accepted and then fail at inference.
+        unreachable = [l for l in profile["languages"] if l not in prompt_dict]
+        if unreachable:
+            raise ValueError(
+                f"variant profile advertises languages with no "
+                f"prompt_dictionary key: {unreachable}"
+            )
 
         writer.add_uint32("stt.parakeet.prompt.num_prompts",     num_prompts)
         writer.add_uint32("stt.parakeet.prompt.hidden",          prompt_hidden)

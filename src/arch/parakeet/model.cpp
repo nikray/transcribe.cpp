@@ -200,6 +200,62 @@ bool fill_prompt_one_hot(std::vector<float> &         out,
     return true;
 }
 
+// Resolve `language_hint` and upload the replicated one-hot into a
+// prompt-conditioned encoder graph's `prompt.one_hot.in` input. No-op
+// (TRANSCRIBE_OK) when the graph has no prompt input. Must run after the
+// graph is allocated and before it is computed: the prompt MLP reads this
+// tensor on every frame, and nothing else initialises it.
+transcribe_status upload_prompt_one_hot(ggml_tensor *           one_hot_in,
+                                        const ParakeetHParams & hp,
+                                        const char *            language_hint,
+                                        const char *            log_tag) {
+    if (one_hot_in == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    const int     P    = static_cast<int>(one_hot_in->ne[0]);
+    const int     T_oh = static_cast<int>(one_hot_in->ne[1]);
+    const int32_t pid  = resolve_prompt_id(hp, language_hint);
+    if (pid < 0) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s: language %s%s%s not in prompt dictionary", log_tag,
+                language_hint ? "\"" : "", language_hint ? language_hint : "<null>", language_hint ? "\"" : "");
+        return TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE;
+    }
+    std::vector<float> one_hot_buf;
+    if (!fill_prompt_one_hot(one_hot_buf, P, T_oh, /*n_batch=*/1, { pid })) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s: prompt_id %d out of range [0, %d)", log_tag, pid, P);
+        return TRANSCRIBE_ERR_GGUF;
+    }
+    ggml_backend_tensor_set(one_hot_in, one_hot_buf.data(), 0, one_hot_buf.size() * sizeof(float));
+    // Host copy of exactly what was uploaded ([T_enc, num_prompts] rows),
+    // so a parity harness can assert the slot and the frame coverage.
+    if (transcribe::debug::enabled()) {
+        const long long shape[2] = { static_cast<long long>(T_oh), static_cast<long long>(P) };
+        transcribe::debug::dump_host_f32("prompt.one_hot", one_hot_buf.data(),
+                                         static_cast<long long>(one_hot_buf.size()), shape, 2,
+                                         "encoder.prompt.one_hot");
+    }
+    return TRANSCRIBE_OK;
+}
+
+// Stream pre-flight for prompt-conditioned variants: the language hint
+// must resolve to a prompt slot. The dispatcher only checks the hint
+// against general.languages; without this, an advertised language with
+// no prompt-dictionary key (or any hint on a model that advertises no
+// list) is accepted at begin and fails inside the first encoder step.
+transcribe_status validate_stream_prompt_language(const ParakeetHParams &       hp,
+                                                  const transcribe_run_params * run_params) {
+    if (!hp.has_prompt) {
+        return TRANSCRIBE_OK;
+    }
+    const char * language_hint = run_params != nullptr ? run_params->language : nullptr;
+    if (resolve_prompt_id(hp, language_hint) < 0) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet stream: language %s%s%s not in prompt dictionary",
+                language_hint ? "\"" : "", language_hint ? language_hint : "<null>", language_hint ? "\"" : "");
+        return TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE;
+    }
+    return TRANSCRIBE_OK;
+}
+
 // Fuse inference-time BatchNorm into scale + bias tensors:
 //   BN eval: y = (x - mean) / sqrt(var + eps) * weight + bias
 //   fused:   y = x * scale + shift,  scale = weight / sqrt(var + eps),
@@ -3317,6 +3373,15 @@ transcribe_status emit_buffered_chunk(ParakeetSession * pc,
         ggml_backend_tensor_set(eb.chunked_mask_in, mask_buf.data(), 0, mask_buf.size() * sizeof(float));
     }
 
+    // Prompt one-hot (multilingual unified variants). The prompt MLP is
+    // frame-wise, so conditioning the whole [left | chunk | right] window
+    // and slicing afterwards equals NeMo's forward() on the same window.
+    if (const transcribe_status st =
+            upload_prompt_one_hot(eb.prompt_one_hot_in, hp, pc->stream_run_params.language, "parakeet buffered");
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+
     // ----- Threading -----
     transcribe::configure_sched_n_threads(pc->sched, pc->n_threads);
 
@@ -3382,7 +3447,16 @@ transcribe_status emit_buffered_chunk(ParakeetSession * pc,
     pc->enc_host.resize(static_cast<size_t>(d_enc) * static_cast<size_t>(T_enc_full));
     ggml_backend_tensor_get(eb.out, pc->enc_host.data(), 0, pc->enc_host.size() * sizeof(float));
 
-    transcribe::debug::dump_tensor("enc.final", eb.out, "encoder.final");
+    // Same names as the offline path: enc.final is the last block's
+    // output; on prompt-conditioned variants eb.out is the prompt MLP's
+    // output and dumps as enc.prompted, next to the one-hot it consumed.
+    const bool dump_prompt = hp.has_prompt && eb.dumps.final_out != nullptr && eb.prompt_one_hot_in != nullptr;
+    if (dump_prompt) {
+        transcribe::debug::dump_tensor("enc.final", eb.dumps.final_out, "encoder.final");
+        transcribe::debug::dump_tensor("enc.prompted", eb.out, "encoder.prompted");
+    } else {
+        transcribe::debug::dump_tensor("enc.final", eb.out, "encoder.final");
+    }
 
     // Subsample session into encoder frames — mirrors NeMo's
     // buffer.context_size.subsample(factor=encoder_frame2audio_samples).
@@ -3424,6 +3498,18 @@ transcribe_status emit_buffered_chunk(ParakeetSession * pc,
         transcribe::debug::dump_host_f32("enc_out", enc_chunk,
                                          static_cast<long long>(T_chunk_avail) * static_cast<long long>(d_enc), shape,
                                          2, "buffered_streaming.enc_out");
+        // Prompt-conditioned variants: the same slice before the prompt
+        // MLP, so the parity harness can separate an encoder mismatch
+        // from a prompt mismatch.
+        if (dump_prompt) {
+            std::vector<float> unprompted(static_cast<size_t>(d_enc) * static_cast<size_t>(T_enc_full));
+            ggml_backend_tensor_get(eb.dumps.final_out, unprompted.data(), 0, unprompted.size() * sizeof(float));
+            transcribe::debug::dump_host_f32(
+                "enc_out_unprompted",
+                unprompted.data() + static_cast<size_t>(ctx_left_frames) * static_cast<size_t>(d_enc),
+                static_cast<long long>(T_chunk_avail) * static_cast<long long>(d_enc), shape, 2,
+                "buffered_streaming.enc_out_unprompted");
+        }
     }
 
     // ----- Decode with carried RNN-T state -----
@@ -3640,6 +3726,9 @@ transcribe_status stream_validate(const transcribe_session *       session,
             return st;
         }
     }
+    if (const auto st = validate_stream_prompt_language(pm->hparams, run_params); st != TRANSCRIBE_OK) {
+        return st;
+    }
     return validate_bias(pm, run_params, stream_bias_boost(stream_params != nullptr ? stream_params->family : nullptr));
 }
 
@@ -3662,6 +3751,12 @@ transcribe_status stream_begin(transcribe_session *             session,
         (pm->hparams.enc_att_context_style == ParakeetHParams::AttContextStyle::ChunkedLimitedWithRc);
     if (!is_chunked_limited && !is_chunked_with_rc) {
         return TRANSCRIBE_ERR_NOT_IMPLEMENTED;
+    }
+
+    // Defense in depth (stream_validate already ran); before any state
+    // is touched so a rejection leaves the session as it was.
+    if (const auto st = validate_stream_prompt_language(pm->hparams, run_params); st != TRANSCRIBE_OK) {
+        return st;
     }
 
     pc->stream_audio_input_samples = 0;

@@ -1962,6 +1962,86 @@ def emit_fixtures(out_dir: Path) -> None:
         ),
     )
 
+    # Prompt-conditioned streaming variants (nemotron-3.5 cache-aware and
+    # nemotron-labs-unified buffered). Same toy model plus the prompt KV
+    # block and the four prompt MLP tensors. general.languages
+    # deliberately advertises "fr", which has NO prompt-dictionary key:
+    # the dispatcher's general.languages gate lets it through, so only
+    # the family's stream pre-flight can reject it (before any compute).
+    prompt_num, prompt_hidden = 4, 4
+    prompt_kv = [
+        _pack_kv_array_string("general.languages", ["en", "de", "fr"]),
+        _pack_kv_uint32("stt.parakeet.prompt.num_prompts", prompt_num),
+        _pack_kv_uint32("stt.parakeet.prompt.hidden", prompt_hidden),
+        _pack_kv_string("stt.parakeet.prompt.field", "target_lang"),
+        _pack_kv_string("stt.parakeet.prompt.activation", "relu"),
+        _pack_kv_array_string("stt.parakeet.prompt.dictionary.locales",
+                              ["en", "de", "auto"]),
+        _pack_kv_array_int32("stt.parakeet.prompt.dictionary.indices", [0, 1, 3]),
+        _pack_kv_uint32("stt.parakeet.prompt.auto_id", 3),
+    ]
+
+    def _with_prompt_tensors(base: list[Tensor]) -> list[Tensor]:
+        d_model = PARAKEET_HP["enc_d_model"]
+        out = list(base)
+        for name, ne in [
+            ("prompt.mlp.0.weight", [d_model + prompt_num, prompt_hidden]),
+            ("prompt.mlp.0.bias",   [prompt_hidden]),
+            ("prompt.mlp.2.weight", [prompt_hidden, d_model]),
+            ("prompt.mlp.2.bias",   [d_model]),
+        ]:
+            n_elem = 1
+            for d in ne:
+                n_elem *= d
+            out.append(Tensor(name, ne, GGML_TYPE_F32, _f32_seq(n_elem, len(out))))
+        return out
+
+    _write(
+        out_dir / "tokenizer_minimal_streaming_cache_aware_prompt.gguf",
+        _build_full_gguf(
+            GGUF_MAGIC,
+            [
+                _pack_kv_string("general.architecture", "parakeet"),
+                _pack_kv_string("stt.variant", "rnnt-cache-aware-prompt-toy"),
+                _pack_kv_bool("stt.capability.streaming", True),
+                _pack_kv_string("stt.parakeet.encoder.att_context_style",
+                                "chunked_limited"),
+                _pack_kv_array_int32(
+                    "stt.parakeet.encoder.att_context_size_choices",
+                    [70, 13, 70, 6, 70, 1, 70, 0]),
+                _pack_kv_int32("stt.parakeet.encoder.att_context_left",  70),
+                _pack_kv_int32("stt.parakeet.encoder.att_context_right", 13),
+                *prompt_kv,
+                *tokenizer_kv,
+                *parakeet_hparams_kv,
+            ],
+            _with_prompt_tensors(parakeet_tensors_causal),
+        ),
+    )
+    _write(
+        out_dir / "tokenizer_minimal_streaming_buffered_prompt.gguf",
+        _build_full_gguf(
+            GGUF_MAGIC,
+            [
+                _pack_kv_string("general.architecture", "parakeet"),
+                _pack_kv_string("stt.variant", "rnnt-buffered-prompt-toy"),
+                _pack_kv_bool("stt.capability.streaming", True),
+                _pack_kv_string("stt.parakeet.encoder.att_context_style",
+                                "chunked_limited_with_rc"),
+                _pack_kv_array_int32(
+                    "stt.parakeet.encoder.att_chunk_left_choices",  [70]),
+                _pack_kv_array_int32(
+                    "stt.parakeet.encoder.att_chunk_chunk_choices", [1, 2, 7, 13]),
+                _pack_kv_array_int32(
+                    "stt.parakeet.encoder.att_chunk_right_choices", [0, 1, 2, 4, 7, 13]),
+                *prompt_kv,
+                *tokenizer_kv,
+                *parakeet_hparams_kv,
+            ],
+            _with_prompt_tensors(parakeet_tensors),
+        ),
+    )
+
     # Granite Speech 5.0 TurboCTC minimal fixture. The tokenizer is
     # decode-only for this CTC family, so an empty merge table is legal.
     granite5_ctc_tokenizer_kv = [

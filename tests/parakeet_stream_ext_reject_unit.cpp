@@ -221,12 +221,66 @@ void test_buffered_zero_is_real_value() {
     transcribe_model_free(model);
 }
 
+// Prompt-conditioned variants (nemotron-3.5 cache-aware,
+// nemotron-labs-unified buffered): the language hint must resolve to a
+// prompt slot at stream_begin, not inside the first encoder step.
+//
+// The fixtures advertise general.languages = {en, de, fr} but their
+// prompt dictionary is {en, de, auto}. "fr" therefore passes the
+// dispatcher's general.languages gate and only the family pre-flight
+// can reject it; "xx" is rejected by the dispatcher (same status).
+// en / de / NULL (-> the auto slot) must begin cleanly.
+void test_prompt_language_preflight(const char * fixture) {
+    struct transcribe_model *   model = nullptr;
+    struct transcribe_session * ctx   = nullptr;
+    if (!load_and_init(fixture, &model, &ctx)) {
+        return;
+    }
+
+    auto begin_with = [&](const char * language) {
+        transcribe_run_params rp;
+        transcribe_run_params_init(&rp);
+        rp.language = language;
+        transcribe_stream_params sp;
+        transcribe_stream_params_init(&sp);
+        return transcribe_stream_begin(ctx, &rp, &sp);
+    };
+
+    for (const char * bad : { "fr", "xx" }) {
+        const transcribe_status st = begin_with(bad);
+        if (st != TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE) {
+            std::fprintf(stderr, "FAIL %s:%d: %s language \"%s\" -> %s, expected UNSUPPORTED_LANGUAGE\n", __FILE__,
+                         __LINE__, fixture, bad, transcribe_status_string(st));
+            ++g_failures;
+        }
+        // Pre-flight rejection leaves lifecycle / last_status untouched.
+        CHECK(transcribe_stream_get_state(ctx) == TRANSCRIBE_STREAM_IDLE);
+        CHECK(transcribe_stream_last_status(ctx) == TRANSCRIBE_OK);
+    }
+
+    for (const char * good : { "en", "de", static_cast<const char *>(nullptr) }) {
+        const transcribe_status st = begin_with(good);
+        if (st != TRANSCRIBE_OK) {
+            std::fprintf(stderr, "FAIL %s:%d: %s language %s -> %s, expected OK\n", __FILE__, __LINE__, fixture,
+                         good != nullptr ? good : "<null>", transcribe_status_string(st));
+            ++g_failures;
+        }
+        transcribe_stream_reset(ctx);
+        CHECK(transcribe_stream_get_state(ctx) == TRANSCRIBE_STREAM_IDLE);
+    }
+
+    transcribe_session_free(ctx);
+    transcribe_model_free(model);
+}
+
 }  // namespace
 
 int main() {
     test_cache_aware_rejects_sub_sentinel();
     test_buffered_rejects_sub_sentinel();
     test_buffered_zero_is_real_value();
+    test_prompt_language_preflight("tokenizer_minimal_streaming_cache_aware_prompt.gguf");
+    test_prompt_language_preflight("tokenizer_minimal_streaming_buffered_prompt.gguf");
 
     if (g_failures > 0) {
         std::fprintf(stderr, "parakeet_stream_ext_reject_unit: %d failures\n", g_failures);

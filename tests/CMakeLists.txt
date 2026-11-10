@@ -594,6 +594,8 @@ set(TRANSCRIBE_FIXTURE_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tokenizer_minimal_streaming.gguf
     ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tokenizer_minimal_streaming_cache_aware.gguf
     ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tokenizer_minimal_streaming_buffered.gguf
+    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tokenizer_minimal_streaming_cache_aware_prompt.gguf
+    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tokenizer_minimal_streaming_buffered_prompt.gguf
     ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/arch_cohere_minimal.gguf
     ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/arch_granite5_ctc_minimal.gguf
     ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/arch_qwen3_asr_minimal.gguf
